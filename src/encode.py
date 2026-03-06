@@ -11,7 +11,7 @@ def main():
         output_file_path: 输出视频文件路径
         max_length_of_video: 视频最大长度，单位：毫秒ms
     """
-    assert len(sys.argv) == 3, "缺少参数，正确用法: encode <input_file> <output_file> <max_length_of_video>"
+    assert len(sys.argv) == 4, "缺少参数，正确用法: encode <input_file> <output_file> <max_length_of_video>"
     input_file_path = sys.argv[1]
     output_file_path = sys.argv[2]
     max_length_of_video = int(sys.argv[3])
