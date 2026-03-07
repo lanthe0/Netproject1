@@ -1,6 +1,9 @@
 """
+二维码协议编解码文件
+方法：
+  - encode_bin(path) 传入路径，返回一个矩阵列表
+  - decode_image(image) 传入二维码，返回数据与合法性标志（均为二进制）
 """
-
 
 from __future__ import annotations
 
@@ -8,18 +11,7 @@ import numpy as np
 
 from utils.showimg import show_binary_matrix
 
-
-GRID_SIZE = 108
-QUIET_WIDTH = 2
-
-BIG_FINDER_SIZE = 14
-SMALL_FINDER_SIZE = 8
-
-# Region bounds: (row_start, row_end_exclusive, col_start, col_end_exclusive)
-HEADER_BOUNDS = (2, 16, 18, 90)   # 14 x 72
-CHECK_BOUNDS = (18, 90, 2, 16)    # 72 x 14
-DATA_BOUNDS = (18, 106, 18, 106)  # 88 x 88
-SMALL_FINDER_BOUNDS = (98, 106, 98, 106)  # 8 x 8, inside data area
+from config import *
 
 
 def _build_big_finder() -> np.ndarray:
@@ -127,6 +119,20 @@ def preview_random_compliant_qr(
     show_binary_matrix(grid, pixel_per_cell=pixel_per_cell, window_name=window_name)
     return grid
 
+
+def encode_bin(path) -> list[np.ndarray]:
+    """
+    将二进制文件编码为二维码矩阵列表\n
+    Args:
+        path: 输入二进制文件路径，长度 ≤ 10MB
+    """
+    
+def decode_image(img: np.ndarray) -> tuple[bytes, bytes]:
+    """
+    将二维码矩阵解码为二进制数据与合法性标志\n
+    Args:
+        img: 二维二维码矩阵
+    """
 
 if __name__ == "__main__":
     preview_random_compliant_qr(seed=None, pixel_per_cell=8)

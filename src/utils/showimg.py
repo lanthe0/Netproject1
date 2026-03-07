@@ -1,3 +1,7 @@
+"""
+展示图片函数
+"""
+
 import numpy as np
 
 def matrix_to_bw_image(matrix: np.ndarray, pixel_per_cell: int = 1) -> np.ndarray:
