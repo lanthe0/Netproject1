@@ -4,7 +4,7 @@ from config import *
     
 def bin2video(path: str, output_path: str, max_length_of_video: int, fps: int = 15):
     """
-    将二进制文件转换为视频文件, 视频格式为mp4, 写入output_path\n
+    将二进制文件转换为视频文件, 视频格式为mp4, 写入output_path
     Args:
         path: 输入二进制文件路径，长度 ≤ 10MB
         output_path: 输出视频文件路径

@@ -4,7 +4,7 @@ from config import *
 
 def bin2img(data: bytes):
     """
-    将二进制数据转换为图片组\n
+    将二进制数据转换为图片组
     严格遵循 config.py 中的 HEADER_BOUNDS, CHECK_BOUNDS, DATA_BOUNDS\n
     Args:
         data: 二进制数据
@@ -24,7 +24,7 @@ def bin2img(data: bytes):
         # 初始化 108x108 矩阵 (默认白色 255)
         matrix = np.ones((GRID_SIZE, GRID_SIZE), dtype=np.uint8) * 255
         
-        # --- 绘制固定定位格 (组长庄嘉豪的 V2 设计) ---
+        # --- 绘制固定定位格 (二维码 V2 设计) ---
         # 左上、右上、左下大定位格 (14x14)
         matrix[2:16, 2:16] = 0
         matrix[2:16, 92:106] = 0
