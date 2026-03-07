@@ -18,4 +18,4 @@ DATA_BOUNDS = (18, 106, 18, 106)  # 88 x 88
 SMALL_FINDER_BOUNDS = (98, 106, 98, 106)  # 8 x 8, inside data area
 
 # 数据区容量限制
-DATA_SIZE_LIMIT = 88 * 88 - 64 
+DATA_SIZE_LIMIT = 88 * 88 - 64
