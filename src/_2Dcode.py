@@ -109,48 +109,6 @@ def _iter_data_cells():
 DATA_ITER = list(_iter_data_cells())
 INFO_ITER = list(_iter_cells(HEADER_BOUNDS))
 
-def _fill_region_random(grid: np.ndarray, cells, rng: np.random.Generator) -> None:
-    for r, c in cells:
-        grid[r, c] = np.uint8(rng.integers(0, 2))
-
-
-def generate_random_compliant_qr(
-    seed: int | None = None,
-    fill_header: bool = True,
-    fill_check: bool = True,
-    fill_data: bool = True,
-) -> np.ndarray:
-    """
-    生成一个随机二维码
-    Args:
-        seed: 随机种子
-        fill_header: 是否放置信息头
-        fill_check: 是否放置校验区
-        fill_data: 是否放置数据区
-    """
-    grid = make_base_grid()
-    rng = np.random.default_rng(seed)
-
-    if fill_header:
-        _fill_region_random(grid, _iter_cells(HEADER_BOUNDS), rng)
-    if fill_check:
-        _fill_region_random(grid, _iter_cells(CHECK_BOUNDS), rng)
-    if fill_data:
-        _fill_region_random(grid, _iter_data_cells_excluding_small_finder(), rng)
-
-    return grid
-
-
-def preview_random_compliant_qr(
-    seed: int | None = None,
-    pixel_per_cell: int = 8,
-    window_name: str = "Random Compliant QR",
-) -> np.ndarray:
-    """Generate and display one random compliant QR-like matrix."""
-    grid = generate_random_compliant_qr(seed=seed)
-    show_binary_matrix(grid, pixel_per_cell=pixel_per_cell, window_name=window_name)
-    return grid
-
 def save_test_frames(grids: np.ndarray, out_dir: str = "outputs/test_frames") -> None:
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -165,13 +123,13 @@ def save_test_frames(grids: np.ndarray, out_dir: str = "outputs/test_frames") ->
         if not ok:
             raise RuntimeError(f"保存失败: frame_{i:04d}.png")
 
-def get_infoheader_from_bits(len: int, index: int) -> np.ndarray:
+def get_infoheader_from_bits(length: int, index: int) -> np.ndarray:
     """由bit流即序列号生成信息头矩阵"""
     # 信息头包括：
     # 1. 帧序列号
     # 2. 有效数据长度
 
-    len_bits = len.to_bytes(2, byteorder="big")
+    len_bits = length.to_bytes(2, byteorder="big")
     index_bits = index.to_bytes(2, byteorder="big")
     return bytes_to_bits(len_bits + index_bits)
     
@@ -183,7 +141,7 @@ def get_checkcode_from_bits(data : bytes) -> np.ndarray:
 
 def get_from_bits(bits: np.ndarray, index : int) -> np.ndarray:
     """从bits中提取出二维码矩阵"""
-    grid = make_base_grid()
+    grid = BASE_GRID.copy()
     for idx, (r, c) in enumerate(DATA_ITER):
         if idx >= len(bits):
             break
