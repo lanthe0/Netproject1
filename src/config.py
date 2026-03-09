@@ -17,3 +17,6 @@ SMALL_FINDER_BOUNDS = (98, 106, 98, 106)
 
 # 数据区容量限制
 DATA_SIZE_LIMIT = 9948
+
+# 信息头大小
+HEADER_SIZE = 64

@@ -131,8 +131,7 @@ def get_infoheader_from_bits(length: int, index: int) -> np.ndarray:
 
     len_bits = length.to_bytes(2, byteorder="big")
     index_bits = index.to_bytes(2, byteorder="big")
-    return bytes_to_bits(len_bits + index_bits)
-    
+    return bytes_to_bits(len_bits + index_bits)    
 
 def get_checkcode_from_bits(data : bytes) -> np.ndarray:
     """由bit流生成校验码"""
@@ -175,13 +174,17 @@ def encode_bin(path) -> list[np.ndarray]:
     return grids
     
     
-def decode_image(img: np.ndarray) -> tuple[bytes, bytes]:
+def decode_image(imgs: np.ndarray, out_bin_path: str, out_vbin_path: str) -> None:
     """
     将二维码矩阵解码为二进制数据与合法性标志\n
-    将返回数据与合法性标志的元组，均为二进制数据
+    将向路径写入解码后的二进制文件和每位有效性标记文件\n
     Args:
-        img: 二维二维码矩阵
+        imgs: 二维二维码矩阵序列
+        
     """
+    
+    
+    
 
 if __name__ == "__main__":
     tmp = encode_bin("pushtest.txt")
