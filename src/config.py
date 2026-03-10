@@ -9,14 +9,14 @@ QUIET_WIDTH = 2
 
 # 定位格大小
 BIG_FINDER_SIZE = 14
-SMALL_FINDER_SIZE = 8
+SMALL_FINDER_SIZE = 7
 
 # 区域范围: (row_start, row_end, col_start, col_end)
 HEADER_BOUNDS = (2, 10, 18, 26)
-SMALL_FINDER_BOUNDS = (98, 106, 98, 106)
+SMALL_FINDER_BOUNDS = (99, 106, 99, 106)
 
 # 数据区容量限制
-DATA_SIZE_LIMIT = 9948
+DATA_SIZE_LIMIT = 9884
 
 # 信息头大小
 HEADER_SIZE = 64
