@@ -20,3 +20,6 @@ DATA_SIZE_LIMIT = 9884
 
 # 信息头大小
 HEADER_SIZE = 64
+
+# 数据区范围
+DATA_BOUNDS = (2, 106, 27, 98)

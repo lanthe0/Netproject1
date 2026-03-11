@@ -4,6 +4,8 @@ import time
 import numpy as np
 import cv2
 from utils.bin2video import bin2video
+from utils.showimg import *
+from _2Dcode import encode_bin
 
 def main():
     
@@ -22,7 +24,6 @@ def main():
 
     input_file_path = sys.argv[1]
     output_file_path = sys.argv[2]
-    # max_length_of_video = int(sys.argv[3])
     try:
         max_length_of_video = int(sys.argv[3])
     except ValueError:
@@ -32,6 +33,11 @@ def main():
     # 2. 文件存在性校验
     if not os.path.exists(input_file_path):
         print(f"Error: 找不到输入文件 '{input_file_path}'")
+        sys.exit(1)
+    
+    # 3. 文件大小校验
+    if  os.path.getsize(input_file_path) > 10 * 1024 * 1024:
+        print("输入文件大小超过10MB")
         sys.exit(1)
         
     # 3. 统计编码耗时
@@ -45,7 +51,11 @@ def main():
     # 文件转视频
     try:
         # 执行核心 bin2video 逻辑
-        bin2video(path=input_file_path, output_path=output_file_path, max_length_of_video=max_length_of_video)
+        grids = encode_bin(input_file_path)
+        # grids = matrix_to_bw_image(grids, pixel_per_cell=1)  # 转为图片格式
+        bin2video(grids=grids, output_path=output_file_path, max_length_of_video=max_length_of_video)
+        # for grid in grids:
+        #     show_binary_matrix(grid, pixel_per_cell=10, window_name="Sample Frame", wait_ms=1000)
         end_time = time.time()
         print(f"--- 编码成功 ---")
         print(f"总耗时: {end_time - start_time:.2f} 秒")

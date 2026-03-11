@@ -150,7 +150,7 @@ def get_from_bits(bits: np.ndarray, index : int) -> np.ndarray:
             break
         grid[r, c] = bits[idx]
     
-    check = get_checkcode_from_bits(np.packbits(bits))
+    check = get_checkcode_from_bits(np.packbits(bits).tobytes())
     info = get_infoheader_from_bits(len(bits), index)
     header = np.concatenate((check, info))
     
@@ -161,7 +161,7 @@ def get_from_bits(bits: np.ndarray, index : int) -> np.ndarray:
     
     return grid
 
-def encode_bin(path) -> list[np.ndarray]:
+def encode_bin(path) -> np.ndarray:
     """
     将二进制文件编码为二维码矩阵列表\n
     Args:
@@ -176,7 +176,27 @@ def encode_bin(path) -> list[np.ndarray]:
     grids = np.array([get_from_bits(bits, idx) for idx, bits in enumerate(data_ls)])
     
     return grids
+
+def get_total_length_from_grids(grids: np.ndarray) -> int:
+    """
+    通过解析 grids 序列的信息头获取原始文件的总字节数
+    """
+    total_bits = 0
     
+    for grid in grids:
+        # 1. 从矩阵中提取 Header 区域的比特流
+        header_bits = np.array([grid[r, c] for (r, c) in INFO_ITER[:HEADER_SIZE]], dtype=np.uint8)
+        
+        # 2. 根据协议提取 32:48 位（对应有效数据长度 bit_len）
+        # 注意：在 _2Dcode.py 中，header = crc(32) + len(16) + index(16)
+        info_bits = header_bits[32:64]
+        bit_len = 0
+        for b in info_bits[:16]: # 前 16 位是长度
+            bit_len = (bit_len << 1) | int(b)
+        
+        total_bits += bit_len
+        
+    return total_bits // 8    
     
 def decode_image(imgs: np.ndarray, out_bin_path: str, out_vbin_path: str) -> None:
     """
@@ -298,7 +318,7 @@ def verify_saved_frames(
             raise RuntimeError(f"读取图片失败: {p}")
         frames.append(img)
 
-    decode_image(frames, decoded_file_path, validity_file_path)
+    decode_image(np.array(frames), decoded_file_path, validity_file_path)
 
     with open(original_file_path, "rb") as f:
         original = f.read()
