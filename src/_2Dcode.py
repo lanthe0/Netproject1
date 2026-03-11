@@ -7,12 +7,37 @@
 
 from __future__ import annotations
 
+import binascii
+from pathlib import Path
+from collections.abc import Iterator, Sequence
+
+import cv2
 import numpy as np
 
-from utils.showimg import *
-from pathlib import Path
-from config import *
-import cv2, binascii
+try:
+    from .config import (
+        BIG_FINDER_SIZE,
+        DATA_SIZE_LIMIT,
+        GRID_SIZE,
+        HEADER_BOUNDS,
+        HEADER_SIZE,
+        QUIET_WIDTH,
+        SMALL_FINDER_BOUNDS,
+        SMALL_FINDER_SIZE,
+    )
+    from .utils.showimg import matrix_to_bw_image
+except ImportError:
+    from config import (
+        BIG_FINDER_SIZE,
+        DATA_SIZE_LIMIT,
+        GRID_SIZE,
+        HEADER_BOUNDS,
+        HEADER_SIZE,
+        QUIET_WIDTH,
+        SMALL_FINDER_BOUNDS,
+        SMALL_FINDER_SIZE,
+    )
+    from utils.showimg import matrix_to_bw_image
 
 def bytes_to_bits(data: bytes) -> np.ndarray:
     """将字节数据转换为bit01列表"""
@@ -64,7 +89,7 @@ def make_base_grid() -> np.ndarray:
 
 BASE_GRID = make_base_grid()
 
-def _iter_cells(bounds: tuple[int, int, int, int]):
+def _iter_cells(bounds: tuple[int, int, int, int]) -> Iterator[tuple[int, int]]:
     rs, re, cs, ce = bounds
     for r in range(rs, re):
         if r % 2 == 1:
@@ -74,12 +99,12 @@ def _iter_cells(bounds: tuple[int, int, int, int]):
         for c in _iter:
             yield r, c
 
-def draw(vis, x1, y1, x2, y2):
+def draw(vis: np.ndarray, x1: int, y1: int, x2: int, y2: int) -> None:
     for r in range(x1, x2 + 1):
         for c in range(y1, y2 + 1):
             vis[r, c] = 1
 
-def _iter_data_cells():
+def _iter_data_cells() -> Iterator[tuple[int, int]]:
     hrs, hre, hcs, hce = SMALL_FINDER_BOUNDS
     vis = np.zeros((GRID_SIZE, GRID_SIZE), dtype=bool)
     draw(vis, 18, 2, 89, 18)
@@ -111,7 +136,7 @@ INFO_ITER = list(_iter_cells(HEADER_BOUNDS))
 if len(DATA_ITER) != DATA_SIZE_LIMIT:
     raise ValueError(f"数据区容量 {len(DATA_ITER)} 不等于预设值 {DATA_SIZE_LIMIT}")
 
-def save_test_frames(grids: np.ndarray, out_dir: str = "output/test_frames") -> None:
+def save_test_frames(grids: Sequence[np.ndarray], out_dir: str = "output/test_frames") -> None:
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
@@ -150,7 +175,7 @@ def get_from_bits(bits: np.ndarray, index : int) -> np.ndarray:
             break
         grid[r, c] = bits[idx]
     
-    check = get_checkcode_from_bits(np.packbits(bits))
+    check = get_checkcode_from_bits(np.packbits(bits).tobytes())
     info = get_infoheader_from_bits(len(bits), index)
     header = np.concatenate((check, info))
     
@@ -161,7 +186,7 @@ def get_from_bits(bits: np.ndarray, index : int) -> np.ndarray:
     
     return grid
 
-def encode_bin(path) -> list[np.ndarray]:
+def encode_bin(path: str) -> list[np.ndarray]:
     """
     将二进制文件编码为二维码矩阵列表\n
     Args:
@@ -173,12 +198,12 @@ def encode_bin(path) -> list[np.ndarray]:
     bit_data = bytes_to_bits(data)
     data_ls = [np.array(bit_data[i:i+DATA_SIZE_LIMIT], dtype=np.uint8) for i in range(0, len(bit_data), DATA_SIZE_LIMIT)]
     
-    grids = np.array([get_from_bits(bits, idx) for idx, bits in enumerate(data_ls)])
+    grids = [get_from_bits(bits, idx) for idx, bits in enumerate(data_ls)]
     
     return grids
     
     
-def decode_image(imgs: np.ndarray, out_bin_path: str, out_vbin_path: str) -> None:
+def decode_image(imgs: Sequence[np.ndarray] | np.ndarray, out_bin_path: str, out_vbin_path: str) -> None:
     """
     将二维码矩阵解码为二进制数据与合法性标志\n
     将向路径写入解码后的二进制文件和每位有效性标记文件\n
@@ -222,11 +247,13 @@ def decode_image(imgs: np.ndarray, out_bin_path: str, out_vbin_path: str) -> Non
             arr = np.pad(arr, (0, 8 - arr.size % 8), mode="constant", constant_values=0)
         return np.packbits(arr).tobytes()
 
-    arr_imgs = np.asarray(imgs, dtype=object)
-    if arr_imgs.ndim == 2:
-        frames = [arr_imgs]
+    if isinstance(imgs, np.ndarray):
+        if imgs.ndim == 2:
+            frames = [imgs]
+        else:
+            frames = [np.asarray(imgs[i]) for i in range(len(imgs))]
     else:
-        frames = [arr_imgs[i] for i in range(len(arr_imgs))]
+        frames = [np.asarray(frame) for frame in imgs]
 
     decoded_frames: dict[int, tuple[np.ndarray, bool]] = {}
     truncated_len_frames = 0
