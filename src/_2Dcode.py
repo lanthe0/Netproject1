@@ -186,27 +186,52 @@ def decode_image(imgs: np.ndarray, out_bin_path: str, out_vbin_path: str) -> Non
         imgs: 二维二维码矩阵序列(1080x1080)
         
     """
-    def _to_grid(frame: np.ndarray) -> np.ndarray:
-        """将输入帧转换为108x108二值矩阵(1黑0白)。"""
+    def _to_grid(frame) -> np.ndarray:
+        """将输入帧转换为 108x108 二值矩阵 (1 黑 0 白)。"""
+        # 处理可能的 object 类型数组
+        if isinstance(frame, np.ndarray) and frame.dtype == object:
+            # 如果是 object 数组，尝试转换为 uint8
+            try:
+                frame = frame.astype(np.uint8)
+            except:
+                return np.zeros((GRID_SIZE, GRID_SIZE), dtype=np.uint8)
+        
         arr = np.asarray(frame)
-        if arr.ndim == 3:
+        
+        # 确保是 uint8 类型
+        if arr.dtype != np.uint8:
+            arr = arr.astype(np.uint8)
+        
+        # 处理彩色图像（BGR 转灰度）
+        if arr.ndim == 3 and arr.shape[2] == 3:
             arr = cv2.cvtColor(arr, cv2.COLOR_BGR2GRAY)
+        
+        # 处理标准尺寸（108x108）
         if arr.shape == (GRID_SIZE, GRID_SIZE):
-            # 兼容直接传入0/1矩阵或0/255图。
-            if arr.dtype != np.uint8:
-                arr = arr.astype(np.uint8)
-            return (arr > 0).astype(np.uint8) if arr.max() <= 1 else (arr < 128).astype(np.uint8)
+            # 兼容直接传入 0/1 矩阵或 0/255 图。
+            return (arr < 128).astype(np.uint8)
 
-        # 处理放大图(如1080x1080)，按模块中心区域均值采样。
-        module = arr.shape[0] // GRID_SIZE
-        if arr.shape[0] % GRID_SIZE != 0 or arr.shape[1] % GRID_SIZE != 0:
-            raise ValueError("输入图像尺寸无法整除GRID_SIZE，无法采样")
-        grid = np.zeros((GRID_SIZE, GRID_SIZE), dtype=np.uint8)
-        for r in range(GRID_SIZE):
-            for c in range(GRID_SIZE):
-                block = arr[r * module : (r + 1) * module, c * module : (c + 1) * module]
-                grid[r, c] = 1 if np.mean(block) < 128 else 0
-        return grid
+        # 处理放大图 (如 1080x1080)，按模块中心区域均值采样。
+        if arr.ndim == 2:
+            module = arr.shape[0] // GRID_SIZE
+            if arr.shape[0] % GRID_SIZE != 0 or arr.shape[1] % GRID_SIZE != 0:
+                # 无法整除，使用 resize
+                arr = cv2.resize(arr, (GRID_SIZE, GRID_SIZE), interpolation=cv2.INTER_NEAREST)
+                return (arr < 128).astype(np.uint8)
+            
+            grid = np.zeros((GRID_SIZE, GRID_SIZE), dtype=np.uint8)
+            for r in range(GRID_SIZE):
+                for c in range(GRID_SIZE):
+                    block = arr[r * module : (r + 1) * module, c * module : (c + 1) * module]
+                    grid[r, c] = 1 if np.mean(block) < 128 else 0
+            return grid
+        
+        # 默认处理：resize 到标准尺寸
+        if arr.ndim == 2:
+            arr = cv2.resize(arr, (GRID_SIZE, GRID_SIZE), interpolation=cv2.INTER_NEAREST)
+            return (arr < 128).astype(np.uint8)
+        
+        return np.zeros((GRID_SIZE, GRID_SIZE), dtype=np.uint8)
 
     def _bits_to_int(bits: np.ndarray) -> int:
         v = 0
