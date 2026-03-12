@@ -298,7 +298,17 @@ def decode_image(imgs: np.ndarray, out_bin_path: str, out_vbin_path: str) -> Non
 
     with open(out_vbin_path, "wb") as f_vout:
         f_vout.write(_pack_bits(all_valid_bits))
-
+        
+def compare_files(file1_path, file2_path, chunk_size=8192):
+    """二进制模式比较两个文件是否完全相同"""
+    with open(file1_path, 'rb') as f1, open(file2_path, 'rb') as f2:  # ✅ 二进制模式
+        while True:
+            b1 = f1.read(chunk_size)
+            b2 = f2.read(chunk_size)
+            if b1 != b2:
+                return False
+            if not b1:  # 都读到文件末尾
+                return True
 
 def verify_saved_frames(
     frames_dir: str,

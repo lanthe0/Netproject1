@@ -12,6 +12,8 @@ import time
 
 import numpy as np
 
+from _2Dcode import compare_files
+
 try:
     # 包内导入，供编辑器/静态分析器正确解析。
     from ._2Dcode import decode_image
@@ -49,7 +51,8 @@ def main() -> None:
     print(f"Decoded {len(qr_frames)} rectified frame(s) in {duration:.2f}s")
     print(f"Binary output: {os.path.abspath(output_bin_path)}")
     print(f"Validity output: {os.path.abspath(output_vbin_path)}")
-
+    
+    print(f"Are they same: {compare_files(output_bin_path, output_vbin_path)}")
 
 if __name__ == "__main__":
     main()
