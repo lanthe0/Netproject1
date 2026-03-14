@@ -13,9 +13,14 @@ from utils.showimg import *
 from pathlib import Path
 from config import *
 import cv2, binascii
+import reedsolo
 
 def bytes_to_bits(data: bytes) -> np.ndarray:
     """将字节数据转换为bit01列表"""
+    """升级版：兼容多种输入类型的比特转换"""
+    # 无论输入是 bytes, bytearray 还是 list，统一先转为 bytes
+    if not isinstance(data, (bytes, bytearray)):
+        data = bytes(data)
     return np.unpackbits(np.frombuffer(data, dtype=np.uint8))
 
 def _build_big_finder() -> np.ndarray:
@@ -142,18 +147,40 @@ def get_checkcode_from_bits(data : bytes) -> np.ndarray:
 
 def get_from_bits(bits: np.ndarray, index : int) -> np.ndarray:
     """从bits中提取出二维码矩阵"""
+    rs = reedsolo.RSCodec(ECC_BYTES)
     grid = BASE_GRID.copy()
-    if len(bits) > len(DATA_ITER):
-        raise ValueError(f"数据长度 {len(bits)} 超过二维码容量 {len(DATA_ITER)}")
-    for idx, (r, c) in enumerate(DATA_ITER):
-        if idx >= len(bits):
-            break
-        grid[r, c] = bits[idx]
     
-    check = get_checkcode_from_bits(np.packbits(bits).tobytes())
+    # 1. 将原始 bit 数据转换为 bytes 进行 RS 编码
+    raw_bytes = np.packbits(bits).tobytes()
+    
+    # 2. 进行 RS 编码，生成 [原始数据 + ECC 冗余]
+    ecc_payload_bytes = rs.encode(raw_bytes)
+    
+    # 3. 将编码后的位元组重新转换为 bit 数组
+    if not isinstance(ecc_payload_bytes, bytes):
+        ecc_payload_bytes = bytes(ecc_payload_bytes)
+    ecc_bits = bytes_to_bits(ecc_payload_bytes)
+    
+    # 4. 容量校验：现在 bits 的长度变成了 (原始长度 + ECC_BYTES * 8)
+    if len(ecc_bits) > len(DATA_ITER):
+        raise ValueError(f"加上纠错码后数据长度 {len(ecc_bits)} 超过二维码容量 {len(DATA_ITER)}")
+    
+    # 5. 填充数据区 (包含数据和纠错冗余)
+    for idx, (r, c) in enumerate(DATA_ITER):
+        if idx >= len(ecc_bits):
+            break
+        grid[r, c] = ecc_bits[idx]
+    
+    # 6. 生成校验码与 Header
+    # 注意：这里的 CRC 可以选择只校验原始数据，或者校验帶 ECC 的全数据。
+    # CRC 校验原始 bytes，作为 RS 纠错后的二次验证。
+    check = get_checkcode_from_bits(raw_bytes)
+    
+    # 这里的 length 记录「原始比特长度」，以便解码时知道 RS 应该在哪里结束
     info = get_infoheader_from_bits(len(bits), index)
     header = np.concatenate((check, info))
     
+    # 7. 填充 Header 区域
     for idx, (r, c) in enumerate(INFO_ITER):
         if idx >= len(header):
             break
@@ -206,6 +233,8 @@ def decode_image(imgs: np.ndarray, out_bin_path: str, out_vbin_path: str) -> Non
         imgs: 二维二维码矩阵序列(1080x1080)
         
     """
+    rs = reedsolo.RSCodec(ECC_BYTES)
+
     def _to_grid(frame: np.ndarray) -> np.ndarray:
         """将输入帧转换为108x108二值矩阵(1黑0白)。"""
         arr = np.asarray(frame)
@@ -259,12 +288,14 @@ def decode_image(imgs: np.ndarray, out_bin_path: str, out_vbin_path: str) -> Non
         if header_bits.size < HEADER_SIZE:
             continue
 
+        # 解析元数据
+        # header = crc(32) + len(16) + index(16)
         crc_bits = header_bits[:32]
         info_bits = header_bits[32:64]
         expected_crc = _bits_to_int(crc_bits)
         bit_len = _bits_to_int(info_bits[:16])
         frame_idx = _bits_to_int(info_bits[16:32])
-
+        
         if bit_len < 0:
             Warning(f"帧 {frame_idx} 声称长度 {bit_len} 小于0，跳过")
             continue
@@ -272,15 +303,51 @@ def decode_image(imgs: np.ndarray, out_bin_path: str, out_vbin_path: str) -> Non
             Warning(f"帧 {frame_idx} 声称长度 {bit_len} 超过数据区容量 {len(DATA_ITER)}，将被截断")
             bit_len = len(DATA_ITER)
             truncated_len_frames += 1
-
-        payload_bits = np.array([grid[r, c] for (r, c) in DATA_ITER[:bit_len]], dtype=np.uint8)
-        actual_crc = binascii.crc32(np.packbits(payload_bits).tobytes()) & 0xFFFFFFFF
-        valid = (actual_crc == expected_crc)
-
+        
+        # 计算含 ECC 的总比特长度
+        # 原始位元组数 = (raw_bit_len + 7) // 8
+        # 总位元组数 = 原始位元组数 + ECC_BYTES
+        byte_len = (bit_len + 7) // 8
+        total_byte_len = byte_len + ECC_BYTES
+        total_bit_len = total_byte_len * 8
+        
+        # 从数据区提取带冗余的比特流
+        ecc_payload_bits = np.array([grid[r, c] for (r, c) in DATA_ITER[:total_bit_len]], dtype=np.uint8)
+        
+         # 4. 核心：RS 纠错
+        valid = False
+        payload_bits = np.zeros(bit_len, dtype=np.uint8) # 預設為 0
+        
+        try:
+            # 比特轉回位元組
+            ecc_bytes = np.packbits(ecc_payload_bits).tobytes()
+            
+            # 嘗試糾錯與解碼
+            # rs.decode 會返回 (修正後的 bytes, 修正後的 ecc_bytes, 錯誤位置列表)
+            corrected_raw_bytes, _, _ = rs.decode(ecc_bytes)
+            
+            # 將修正後的位元組轉回比特，並截取原始長度（去除 packbits 可能引入的 padding）
+            corrected_bytes = bytes(corrected_raw_bytes)
+            corrected_bits = bytes_to_bits(corrected_bytes)[:bit_len]
+            payload_bits = corrected_bits
+            
+            # 5. 二次校驗：CRC 驗證（確保糾錯後的數據也是正確的）
+            actual_crc = binascii.crc32(corrected_bytes[:byte_len]) & 0xFFFFFFFF
+            if actual_crc == expected_crc:
+                valid = True
+                
+        except reedsolo.ReedSolomonError:
+            # 糾錯失敗：說明該幀損壞程度超過了 ECC_BYTES / 2 個字節
+            valid = False
+            # 這種情況下，我們依然提取未糾錯的原始比特，交給後續處理（或標記為丟失）
+            # payload_bits 已在上方初始化為 0 或可選擇保留未糾錯版本
+            
+         # 6. 存儲解碼結果（若有多個重複幀，優先保留 valid 為 True 的）
         old = decoded_frames.get(frame_idx)
         if old is None or (not old[1] and valid):
             decoded_frames[frame_idx] = (payload_bits, valid)
 
+    # 7. 寫入文件 (保持原有的全域拼接邏輯)
     all_data_bits: list[int] = []
     all_valid_bits: list[int] = []
 
@@ -353,7 +420,7 @@ if __name__ == "__main__":
     
     #preview_data_region_mask(out_path="output/data_region_mask.png")
     #exit(-1)
-    tmp = encode_bin("data/test_pattern.bin")
+    tmp = encode_bin("../data/test_pattern.bin")
     print(len(tmp))
     save_test_frames(tmp)
     verify_saved_frames(
@@ -362,5 +429,5 @@ if __name__ == "__main__":
         decoded_file_path="output/decoded.bin",
         validity_file_path="output/vout.bin",
     )
-    
+
 
