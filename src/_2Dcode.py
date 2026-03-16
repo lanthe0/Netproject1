@@ -56,8 +56,13 @@ def _paste(dst: np.ndarray, src: np.ndarray, top: int, left: int) -> None:
 
 def make_base_grid() -> np.ndarray:
     """创建基本矩阵。"""
+    """
+    动态适配尺寸的底片生成器。
+    支持大尺寸下自动添加中心对齐准心，抵抗镜头畸变。
+    """
     grid = np.zeros((GRID_SIZE, GRID_SIZE), dtype=np.uint8)
-
+    
+    # 放置基础是四个角定位格
     _paste(grid, BIG_FINDER, QUIET_WIDTH, QUIET_WIDTH)
     _paste(grid, BIG_FINDER, QUIET_WIDTH, GRID_SIZE - QUIET_WIDTH - BIG_FINDER_SIZE)
     _paste(grid, BIG_FINDER, GRID_SIZE - QUIET_WIDTH - BIG_FINDER_SIZE, QUIET_WIDTH)
@@ -67,7 +72,65 @@ def make_base_grid() -> np.ndarray:
         GRID_SIZE - QUIET_WIDTH - SMALL_FINDER_SIZE,
         GRID_SIZE - QUIET_WIDTH - SMALL_FINDER_SIZE,
     )
+    
+    if GRID_SIZE >= 128:
+        ALIGN_SIZE = 5
+        align_pattern = np.zeros((ALIGN_SIZE, ALIGN_SIZE), dtype=np.uint8)
+        align_pattern[0, :] = 1
+        align_pattern[-1, :] = 1
+        align_pattern[:, 0] = 1
+        align_pattern[:, -1] = 1
+        align_pattern[2, 2] = 1 # 准心靶点
+        _paste(
+            grid,
+            align_pattern,
+            (GRID_SIZE - ALIGN_SIZE) // 2,
+            (GRID_SIZE - ALIGN_SIZE) // 2,
+        )
     return grid
+
+
+def get_dynamic_data_mask() -> np.ndarray:
+    """动态生成数据区掩码：1代表可写数据，0代表保留区"""
+    vis = np.ones((GRID_SIZE, GRID_SIZE), dtype=bool)
+    
+    # 1. 挖空静默区 (Quiet Zone)
+    vis[:QUIET_WIDTH, :] = 0
+    vis[-QUIET_WIDTH:, :] = 0
+    vis[:, :QUIET_WIDTH] = 0
+    vis[:, -QUIET_WIDTH:] = 0
+    
+    # 辅助函数：挖空指定区域，并默认增加 1 像素的保护白边
+    def exclude_region(r_start, c_start, size, margin=1):
+        r_min = max(0, r_start - margin)
+        r_max = min(GRID_SIZE, r_start + size + margin)
+        c_min = max(0, c_start - margin)
+        c_max = min(GRID_SIZE, c_start + size + margin)
+        vis[r_min:r_max, c_min:c_max] = 0
+
+    # 2. 挖空四个角定位格
+    exclude_region(QUIET_WIDTH, QUIET_WIDTH, BIG_FINDER_SIZE) # 左上
+    exclude_region(QUIET_WIDTH, GRID_SIZE - QUIET_WIDTH - BIG_FINDER_SIZE, BIG_FINDER_SIZE) # 右上
+    exclude_region(GRID_SIZE - QUIET_WIDTH - BIG_FINDER_SIZE, QUIET_WIDTH, BIG_FINDER_SIZE) # 左下
+    exclude_region(GRID_SIZE - QUIET_WIDTH - SMALL_FINDER_SIZE, 
+                   GRID_SIZE - QUIET_WIDTH - SMALL_FINDER_SIZE, SMALL_FINDER_SIZE) # 右下小格
+
+    # 3. 挖空中央对齐准心 (如果当前尺寸触发了准心生成)
+    if GRID_SIZE >= 128:
+        ALIGN_SIZE = 5
+        center_r = (GRID_SIZE - ALIGN_SIZE) // 2
+        center_c = (GRID_SIZE - ALIGN_SIZE) // 2
+        exclude_region(center_r, center_c, ALIGN_SIZE)
+                   
+    # 4. 挖空 Header 区 (直接从配置读取边界)
+    hrs, hre, hcs, hce = HEADER_BOUNDS
+    vis[hrs:hre, hcs:hce] = 0
+    
+    # 5. 如果你在 config.py 定义了 CHECK_BOUNDS，也请解除下方注释挖空它：
+    # crs, cre, ccs, cce = CHECK_BOUNDS
+    # vis[crs:cre, ccs:cce] = 0
+    
+    return vis
 
 
 BASE_GRID = make_base_grid()
@@ -91,29 +154,43 @@ def draw(vis, x1, y1, x2, y2):
 
 
 def _iter_data_cells():
-    hrs, hre, hcs, hce = SMALL_FINDER_BOUNDS
-    vis = np.zeros((GRID_SIZE, GRID_SIZE), dtype=bool)
-    draw(vis, 18, 2, 89, 18)
-    draw(vis, 12, 18, 18, 28)
-    draw(vis, 2, 28, 18, 89)
-    draw(vis, 18, 18, 105, 105)
+    # hrs, hre, hcs, hce = SMALL_FINDER_BOUNDS
+    # vis = np.zeros((GRID_SIZE, GRID_SIZE), dtype=bool)
+    # draw(vis, 18, 2, 89, 18)
+    # draw(vis, 12, 18, 18, 28)
+    # draw(vis, 2, 28, 18, 89)
+    # draw(vis, 18, 18, 105, 105)
 
-    for r in range(hrs - 1, hre):
-        for c in range(hcs - 1, hce):
-            vis[r, c] = 0
+    # for r in range(hrs - 1, hre):
+    #     for c in range(hcs - 1, hce):
+    #         vis[r, c] = 0
 
+    # for r in range(GRID_SIZE):
+    #     if r % 2 == 1:
+    #         indices = range(GRID_SIZE - 1, -1, -1)
+    #     else:
+    #         indices = range(GRID_SIZE)
+    #     for c in indices:
+    #         if vis[r][c]:
+    #             yield r, c
+    """使用动态掩码进行蛇形扫描"""
+    vis = get_dynamic_data_mask()
+    
     for r in range(GRID_SIZE):
         if r % 2 == 1:
-            indices = range(GRID_SIZE - 1, -1, -1)
+            _iter = range(GRID_SIZE-1, -1, -1)
         else:
-            indices = range(GRID_SIZE)
-        for c in indices:
-            if vis[r][c]:
+            _iter = range(GRID_SIZE)
+        for c in _iter:
+            if vis[r, c]:
                 yield r, c
 
 
 DATA_ITER = list(_iter_data_cells())
 INFO_ITER = list(_iter_cells(HEADER_BOUNDS))
+# 计算当前尺寸下能装多少 bit
+DATA_SIZE_LIMIT = len(DATA_ITER)
+print(f"[Config] 自动适配 GRID_SIZE={GRID_SIZE}, 当前单帧纯数据容量为: {DATA_SIZE_LIMIT} bits")
 if len(DATA_ITER) != DATA_SIZE_LIMIT:
     raise ValueError(f"数据区容量 {len(DATA_ITER)} 不等于预设值 {DATA_SIZE_LIMIT}")
 

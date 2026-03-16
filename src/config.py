@@ -3,7 +3,7 @@
 """
 
 # 矩阵大小
-GRID_SIZE = 108
+GRID_SIZE = 144
 # 边距
 QUIET_WIDTH = 2
 
