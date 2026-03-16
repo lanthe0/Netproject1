@@ -398,7 +398,7 @@ def verify_saved_frames(
 
 
 if __name__ == "__main__":
-    tmp = encode_bin("data/test_pattern.bin")
+    tmp = encode_bin("../data/test_pattern.bin")
     print(len(tmp))
     save_test_frames(tmp)
     verify_saved_frames(
