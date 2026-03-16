@@ -56,3 +56,11 @@ Thumbs.db
 # Logs
 *.log
 
+# Generated artifacts (runtime outputs)
+output/compare_test/
+output/debug/
+output/test_frames/
+output/rectified.png
+output/interface_rectified_cropped.jpg
+src/output/
+

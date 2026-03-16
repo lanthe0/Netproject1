@@ -26,6 +26,7 @@ def matrix_to_bw_image(matrix: np.ndarray, pixel_per_cell: int = 1) -> np.ndarra
 
     if pixel_per_cell > 1:
         img = np.repeat(np.repeat(img, pixel_per_cell, axis=0), pixel_per_cell, axis=1)
+
     return img
 
 

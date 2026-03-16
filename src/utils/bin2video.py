@@ -1,29 +1,28 @@
 from utils.bin2img import bin2img
 import cv2
 from config import *
+from utils.showimg import *
+import numpy as np
     
-def bin2video(path: str, output_path: str, max_length_of_video: int, fps: int = 15):
+def bin2video(grids: np.ndarray, output_path: str, max_length_of_video: int, fps: int = 15):
     """
     将二进制文件转换为视频文件, 视频格式为mp4, 写入output_path
     Args:
         path: 输入二进制文件路径，长度 ≤ 10MB
         output_path: 输出视频文件路径
         max_length_of_video: 视频最大长度，单位：毫秒ms
-    """
-    with open(path, "rb") as f:
-        data = f.read()
-        
-    # 计算当前每帧容量 (逻辑同 bin2img)
-    bytes_per_frame = DATA_SIZE_LIMIT // 8
-    total_frames = (len(data) + bytes_per_frame - 1) // bytes_per_frame
+    """   
+  
+    total_frames = grids.shape[0]
     
     # 校验时长
     required_ms = (total_frames / fps) * 1000
-    assert len(data) <= 10 * 1024 * 1024, "输入文件大小超过10MB"
     assert required_ms <= max_length_of_video, f"当前时长限制 ({max_length_of_video}ms) 无法容纳数据，需要约 {int(required_ms)}ms"
         
     # 1. 将二进制数据转换为图片组
-    img_group = bin2img(data)
+    img_group = []
+    for i in range(total_frames):
+        img_group.append(matrix_to_bw_image(grids[i], pixel_per_cell=1))
     
     # 2. 使用opencv将img_group写入视频文件
     # 视频参数

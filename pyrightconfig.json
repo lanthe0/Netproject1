@@ -1,0 +1,10 @@
+{
+  "include": [
+    "src"
+  ],
+  "venvPath": ".",
+  "venv": ".conda",
+  "extraPaths": [
+    "src"
+  ]
+}

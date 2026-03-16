@@ -7,16 +7,23 @@
 
 from __future__ import annotations
 
-import numpy as np
-
-from utils.showimg import *
 from pathlib import Path
+
+import binascii
+import cv2
+import numpy as np
+import reedsolo
+
 from config import *
-import cv2, binascii
+from utils.showimg import *
+
 
 def bytes_to_bits(data: bytes) -> np.ndarray:
-    """将字节数据转换为bit01列表"""
+    """将字节数据转换为 bit01 列表，兼容多种输入类型。"""
+    if not isinstance(data, (bytes, bytearray)):
+        data = bytes(data)
     return np.unpackbits(np.frombuffer(data, dtype=np.uint8))
+
 
 def _build_big_finder() -> np.ndarray:
     finder = np.zeros((BIG_FINDER_SIZE, BIG_FINDER_SIZE), dtype=np.uint8)
@@ -41,16 +48,16 @@ def _build_small_finder() -> np.ndarray:
 BIG_FINDER = _build_big_finder()
 SMALL_FINDER = _build_small_finder()
 
+
 def _paste(dst: np.ndarray, src: np.ndarray, top: int, left: int) -> None:
     h, w = src.shape
     dst[top : top + h, left : left + w] = src
 
 
 def make_base_grid() -> np.ndarray:
-    """创建基本矩阵"""
+    """创建基本矩阵。"""
     grid = np.zeros((GRID_SIZE, GRID_SIZE), dtype=np.uint8)
 
-    # 放置定位格
     _paste(grid, BIG_FINDER, QUIET_WIDTH, QUIET_WIDTH)
     _paste(grid, BIG_FINDER, QUIET_WIDTH, GRID_SIZE - QUIET_WIDTH - BIG_FINDER_SIZE)
     _paste(grid, BIG_FINDER, GRID_SIZE - QUIET_WIDTH - BIG_FINDER_SIZE, QUIET_WIDTH)
@@ -62,22 +69,26 @@ def make_base_grid() -> np.ndarray:
     )
     return grid
 
+
 BASE_GRID = make_base_grid()
+
 
 def _iter_cells(bounds: tuple[int, int, int, int]):
     rs, re, cs, ce = bounds
     for r in range(rs, re):
         if r % 2 == 1:
-            _iter = range(ce-1, cs-1, -1)
+            indices = range(ce - 1, cs - 1, -1)
         else:
-            _iter = range(cs, ce)
-        for c in _iter:
+            indices = range(cs, ce)
+        for c in indices:
             yield r, c
+
 
 def draw(vis, x1, y1, x2, y2):
     for r in range(x1, x2 + 1):
         for c in range(y1, y2 + 1):
             vis[r, c] = 1
+
 
 def _iter_data_cells():
     hrs, hre, hcs, hce = SMALL_FINDER_BOUNDS
@@ -86,24 +97,19 @@ def _iter_data_cells():
     draw(vis, 12, 18, 18, 28)
     draw(vis, 2, 28, 18, 89)
     draw(vis, 18, 18, 105, 105)
-    
-    for r in range(hrs-1, hre):
-        for c in range(hcs-1, hce):
+
+    for r in range(hrs - 1, hre):
+        for c in range(hcs - 1, hce):
             vis[r, c] = 0
-        
+
     for r in range(GRID_SIZE):
         if r % 2 == 1:
-            _iter = range(GRID_SIZE-1, -1, -1)
+            indices = range(GRID_SIZE - 1, -1, -1)
         else:
-            _iter = range(GRID_SIZE)
-        for c in _iter:
+            indices = range(GRID_SIZE)
+        for c in indices:
             if vis[r][c]:
                 yield r, c
-    
-    # for r in range(GRID_SIZE):
-    #     for c in range(GRID_SIZE):
-    #         if vis[r][c]:
-    #             yield r, c
 
 
 DATA_ITER = list(_iter_data_cells())
@@ -111,133 +117,148 @@ INFO_ITER = list(_iter_cells(HEADER_BOUNDS))
 if len(DATA_ITER) != DATA_SIZE_LIMIT:
     raise ValueError(f"数据区容量 {len(DATA_ITER)} 不等于预设值 {DATA_SIZE_LIMIT}")
 
+
 def save_test_frames(grids: np.ndarray, out_dir: str = "output/test_frames") -> None:
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
     for i, grid in enumerate(grids):
-        # 1) 保存原始矩阵（0/1）
         np.save(out / f"frame_{i:04d}.npy", grid)
-
-        # 2) 保存可视化图片（1黑0白，放大10倍）
         img = matrix_to_bw_image(grid, pixel_per_cell=10)
         ok = cv2.imwrite(str(out / f"frame_{i:04d}.png"), img)
         if not ok:
             raise RuntimeError(f"保存失败: frame_{i:04d}.png")
 
-def get_infoheader_from_bits(length: int, index: int) -> np.ndarray:
-    """由bit流即序列号生成信息头矩阵"""
-    # 信息头包括：
-    # 1. 帧序列号
-    # 2. 有效数据长度
 
+def get_infoheader_from_bits(length: int, index: int) -> np.ndarray:
+    """由 bit 流和序列号生成信息头矩阵。"""
     len_bits = length.to_bytes(2, byteorder="big")
     index_bits = index.to_bytes(2, byteorder="big")
-    return bytes_to_bits(len_bits + index_bits)    
+    return bytes_to_bits(len_bits + index_bits)
 
-def get_checkcode_from_bits(data : bytes) -> np.ndarray:
-    """由bit流生成校验码"""
-    # 校验区包括：CRC32校验码
+
+def get_checkcode_from_bits(data: bytes) -> np.ndarray:
+    """由 bit 流生成 CRC32 校验码。"""
     return bytes_to_bits(binascii.crc32(data).to_bytes(4, byteorder="big"))
 
-def get_from_bits(bits: np.ndarray, index : int) -> np.ndarray:
-    """从bits中提取出二维码矩阵"""
+
+def get_from_bits(bits: np.ndarray, index: int) -> np.ndarray:
+    """从 bits 中提取出二维码矩阵。"""
+    rs = reedsolo.RSCodec(ECC_BYTES)
     grid = BASE_GRID.copy()
-    if len(bits) > len(DATA_ITER):
-        raise ValueError(f"数据长度 {len(bits)} 超过二维码容量 {len(DATA_ITER)}")
+
+    raw_bytes = np.packbits(bits).tobytes()
+    ecc_payload_bytes = rs.encode(raw_bytes)
+    if not isinstance(ecc_payload_bytes, bytes):
+        ecc_payload_bytes = bytes(ecc_payload_bytes)
+    ecc_bits = bytes_to_bits(ecc_payload_bytes)
+
+    if len(ecc_bits) > len(DATA_ITER):
+        raise ValueError(
+            f"加上纠错码后数据长度 {len(ecc_bits)} 超过二维码容量 {len(DATA_ITER)}"
+        )
+
     for idx, (r, c) in enumerate(DATA_ITER):
-        if idx >= len(bits):
+        if idx >= len(ecc_bits):
             break
-        grid[r, c] = bits[idx]
-    
-    check = get_checkcode_from_bits(np.packbits(bits))
+        grid[r, c] = ecc_bits[idx]
+
+    check = get_checkcode_from_bits(raw_bytes)
     info = get_infoheader_from_bits(len(bits), index)
     header = np.concatenate((check, info))
-    
+
     for idx, (r, c) in enumerate(INFO_ITER):
         if idx >= len(header):
             break
         grid[r, c] = header[idx]
-    
+
     return grid
 
-def encode_bin(path) -> list[np.ndarray]:
+
+def encode_bin(path) -> np.ndarray:
     """
-    将二进制文件编码为二维码矩阵列表\n
+    将二进制文件编码为二维码矩阵列表。
+
     Args:
-        path: 输入二进制文件路径，长度 ≤ 10MB
+        path: 输入二进制文件路径，长度 <= 10MB
     """
     with open(path, "rb") as f:
         data = f.read()
-    
+
     bit_data = bytes_to_bits(data)
-    data_ls = [np.array(bit_data[i:i+DATA_SIZE_LIMIT], dtype=np.uint8) for i in range(0, len(bit_data), DATA_SIZE_LIMIT)]
-    
-    grids = np.array([get_from_bits(bits, idx) for idx, bits in enumerate(data_ls)])
-    
-    return grids
-    
-    
+    data_ls = [
+        np.array(bit_data[i : i + DATA_SIZE_LIMIT], dtype=np.uint8)
+        for i in range(0, len(bit_data), DATA_SIZE_LIMIT)
+    ]
+    return np.array([get_from_bits(bits, idx) for idx, bits in enumerate(data_ls)])
+
+
+def get_total_length_from_grids(grids: np.ndarray) -> int:
+    """通过解析信息头估计原始文件总字节数。"""
+    total_bits = 0
+
+    for grid in grids:
+        header_bits = np.array(
+            [grid[r, c] for (r, c) in INFO_ITER[:HEADER_SIZE]], dtype=np.uint8
+        )
+        info_bits = header_bits[32:64]
+        bit_len = 0
+        for b in info_bits[:16]:
+            bit_len = (bit_len << 1) | int(b)
+        total_bits += bit_len
+
+    return total_bits // 8
+
+
 def decode_image(imgs: np.ndarray, out_bin_path: str, out_vbin_path: str) -> None:
     """
-    将二维码矩阵解码为二进制数据与合法性标志\n
-    将向路径写入解码后的二进制文件和每位有效性标记文件\n
+    将二维码矩阵解码为二进制数据与合法性标志。
+
     Args:
-        imgs: 二维二维码矩阵序列(1080x1080)
-        
+        imgs: 二维二维码矩阵序列
     """
+    rs = reedsolo.RSCodec(ECC_BYTES)
+
     def _to_grid(frame) -> np.ndarray:
-        """将输入帧转换为 108x108 二值矩阵 (1 黑 0 白)。"""
-        # 处理可能的 object 类型数组
+        """将输入帧转换为 108x108 二值矩阵（1 黑 0 白）。"""
         if isinstance(frame, np.ndarray) and frame.dtype == object:
-            # 如果是 object 数组，尝试转换为 uint8
             try:
                 frame = frame.astype(np.uint8)
-            except:
+            except (TypeError, ValueError):
                 return np.zeros((GRID_SIZE, GRID_SIZE), dtype=np.uint8)
-        
+
         arr = np.asarray(frame)
-        
-        # 确保是 uint8 类型
         if arr.dtype != np.uint8:
             arr = arr.astype(np.uint8)
-        
-        # 处理彩色图像（BGR 转灰度）
+
         if arr.ndim == 3 and arr.shape[2] == 3:
             arr = cv2.cvtColor(arr, cv2.COLOR_BGR2GRAY)
-        
-        # 处理标准尺寸（108x108）
+
         if arr.shape == (GRID_SIZE, GRID_SIZE):
-            # 兼容直接传入 0/1 矩阵或 0/255 图。
+            if arr.max() <= 1:
+                return (arr > 0).astype(np.uint8)
             return (arr < 128).astype(np.uint8)
 
-        # 处理放大图 (如 1080x1080)，按模块中心区域均值采样。
-        if arr.ndim == 2:
-            module = arr.shape[0] // GRID_SIZE
-            if arr.shape[0] % GRID_SIZE != 0 or arr.shape[1] % GRID_SIZE != 0:
-                # 无法整除，使用 resize
-                arr = cv2.resize(arr, (GRID_SIZE, GRID_SIZE), interpolation=cv2.INTER_NEAREST)
-                return (arr < 128).astype(np.uint8)
-            
-            grid = np.zeros((GRID_SIZE, GRID_SIZE), dtype=np.uint8)
-            for r in range(GRID_SIZE):
-                for c in range(GRID_SIZE):
-                    block = arr[r * module : (r + 1) * module, c * module : (c + 1) * module]
-                    grid[r, c] = 1 if np.mean(block) < 128 else 0
-            return grid
-        
-        # 默认处理：resize 到标准尺寸
-        if arr.ndim == 2:
+        if arr.ndim != 2:
+            return np.zeros((GRID_SIZE, GRID_SIZE), dtype=np.uint8)
+
+        if arr.shape[0] % GRID_SIZE != 0 or arr.shape[1] % GRID_SIZE != 0:
             arr = cv2.resize(arr, (GRID_SIZE, GRID_SIZE), interpolation=cv2.INTER_NEAREST)
             return (arr < 128).astype(np.uint8)
-        
-        return np.zeros((GRID_SIZE, GRID_SIZE), dtype=np.uint8)
+
+        module = arr.shape[0] // GRID_SIZE
+        grid = np.zeros((GRID_SIZE, GRID_SIZE), dtype=np.uint8)
+        for r in range(GRID_SIZE):
+            for c in range(GRID_SIZE):
+                block = arr[r * module : (r + 1) * module, c * module : (c + 1) * module]
+                grid[r, c] = 1 if np.mean(block) < 128 else 0
+        return grid
 
     def _bits_to_int(bits: np.ndarray) -> int:
-        v = 0
-        for b in bits.astype(np.uint8):
-            v = (v << 1) | int(b)
-        return v
+        value = 0
+        for bit in bits.astype(np.uint8):
+            value = (value << 1) | int(bit)
+        return value
 
     def _pack_bits(bits: list[int]) -> bytes:
         if not bits:
@@ -259,8 +280,9 @@ def decode_image(imgs: np.ndarray, out_bin_path: str, out_vbin_path: str) -> Non
     for frame in frames:
         grid = _to_grid(frame)
 
-        # 读取64bit头部: crc32(32) + length(16) + index(16)
-        header_bits = np.array([grid[r, c] for (r, c) in INFO_ITER[:HEADER_SIZE]], dtype=np.uint8)
+        header_bits = np.array(
+            [grid[r, c] for (r, c) in INFO_ITER[:HEADER_SIZE]], dtype=np.uint8
+        )
         if header_bits.size < HEADER_SIZE:
             continue
 
@@ -270,17 +292,29 @@ def decode_image(imgs: np.ndarray, out_bin_path: str, out_vbin_path: str) -> Non
         bit_len = _bits_to_int(info_bits[:16])
         frame_idx = _bits_to_int(info_bits[16:32])
 
-        if bit_len < 0:
-            Warning(f"帧 {frame_idx} 声称长度 {bit_len} 小于0，跳过")
-            continue
         if bit_len > len(DATA_ITER):
-            Warning(f"帧 {frame_idx} 声称长度 {bit_len} 超过数据区容量 {len(DATA_ITER)}，将被截断")
             bit_len = len(DATA_ITER)
             truncated_len_frames += 1
 
-        payload_bits = np.array([grid[r, c] for (r, c) in DATA_ITER[:bit_len]], dtype=np.uint8)
-        actual_crc = binascii.crc32(np.packbits(payload_bits).tobytes()) & 0xFFFFFFFF
-        valid = (actual_crc == expected_crc)
+        byte_len = (bit_len + 7) // 8
+        total_byte_len = byte_len + ECC_BYTES
+        total_bit_len = total_byte_len * 8
+        ecc_payload_bits = np.array(
+            [grid[r, c] for (r, c) in DATA_ITER[:total_bit_len]], dtype=np.uint8
+        )
+
+        valid = False
+        payload_bits = np.zeros(bit_len, dtype=np.uint8)
+
+        try:
+            ecc_bytes = np.packbits(ecc_payload_bits).tobytes()
+            corrected_raw_bytes, _, _ = rs.decode(ecc_bytes)
+            corrected_bytes = bytes(corrected_raw_bytes)
+            payload_bits = bytes_to_bits(corrected_bytes)[:bit_len]
+            actual_crc = binascii.crc32(corrected_bytes[:byte_len]) & 0xFFFFFFFF
+            valid = actual_crc == expected_crc
+        except reedsolo.ReedSolomonError:
+            pass
 
         old = decoded_frames.get(frame_idx)
         if old is None or (not old[1] and valid):
@@ -296,13 +330,29 @@ def decode_image(imgs: np.ndarray, out_bin_path: str, out_vbin_path: str) -> Non
         all_valid_bits.extend(([1] * len(bits_list)) if valid else ([0] * len(bits_list)))
 
     if truncated_len_frames > 0:
-        print(f"[decode] warning: {truncated_len_frames} frame(s) had declared length beyond DATA_ITER capacity; truncated during decode")
+        print(
+            "[decode] warning: "
+            f"{truncated_len_frames} frame(s) had declared length beyond DATA_ITER "
+            "capacity; truncated during decode"
+        )
 
     with open(out_bin_path, "wb") as f_out:
         f_out.write(_pack_bits(all_data_bits))
 
     with open(out_vbin_path, "wb") as f_vout:
         f_vout.write(_pack_bits(all_valid_bits))
+
+
+def compare_files(file1_path, file2_path, chunk_size=8192):
+    """二进制模式比较两个文件是否完全相同。"""
+    with open(file1_path, "rb") as f1, open(file2_path, "rb") as f2:
+        while True:
+            b1 = f1.read(chunk_size)
+            b2 = f2.read(chunk_size)
+            if b1 != b2:
+                return False
+            if not b1:
+                return True
 
 
 def verify_saved_frames(
@@ -323,31 +373,31 @@ def verify_saved_frames(
             raise RuntimeError(f"读取图片失败: {p}")
         frames.append(img)
 
-    decode_image(frames, decoded_file_path, validity_file_path)
+    decode_image(np.asarray(frames, dtype=object), decoded_file_path, validity_file_path)
 
     with open(original_file_path, "rb") as f:
         original = f.read()
     with open(decoded_file_path, "rb") as f:
         decoded = f.read()
 
-    same = (original == decoded)
+    same = original == decoded
     print(f"[verify] frame count: {len(frame_paths)}")
     print(f"[verify] original bytes: {len(original)}")
     print(f"[verify] decoded  bytes: {len(decoded)}")
     print(f"[verify] equal: {same}")
 
     if not same:
-        mismatch = next((i for i, (a, b) in enumerate(zip(original, decoded)) if a != b), None)
+        mismatch = next(
+            (i for i, (a, b) in enumerate(zip(original, decoded)) if a != b),
+            None,
+        )
         if mismatch is None and len(original) != len(decoded):
             mismatch = min(len(original), len(decoded))
         print(f"[verify] first mismatch index: {mismatch}")
     return same
-    
+
 
 if __name__ == "__main__":
-    
-    #preview_data_region_mask(out_path="output/data_region_mask.png")
-    #exit(-1)
     tmp = encode_bin("data/test_pattern.bin")
     print(len(tmp))
     save_test_frames(tmp)
@@ -357,5 +407,3 @@ if __name__ == "__main__":
         decoded_file_path="output/decoded.bin",
         validity_file_path="output/vout.bin",
     )
-    
-

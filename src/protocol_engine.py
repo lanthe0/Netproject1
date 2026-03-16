@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 import numpy as np
 import reedsolo
-from config import GRID_SIZE, HEADER_BOUNDS, CHECK_BOUNDS, DATA_BOUNDS, SMALL_FINDER_BOUNDS
+from config import GRID_SIZE, HEADER_BOUNDS, DATA_BOUNDS, SMALL_FINDER_BOUNDS
 
 class FrameEncoder:
     def __init__(self, ecc_bytes=12):

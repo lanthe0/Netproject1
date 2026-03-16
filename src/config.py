@@ -20,3 +20,9 @@ DATA_SIZE_LIMIT = 9884
 
 # 信息头大小
 HEADER_SIZE = 64
+
+# 数据区范围
+DATA_BOUNDS = (2, 106, 27, 98)
+
+# 每帧增加 16 个 ECC 字节，意味著每帧可以修復 8 个错誤字节
+ECC_BYTES = 16 
