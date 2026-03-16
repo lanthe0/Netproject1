@@ -62,5 +62,10 @@ output/debug/
 output/test_frames/
 output/rectified.png
 output/interface_rectified_cropped.jpg
+output/direct_*.bin
+output/prepared_*.bin
+output/rawframe_*.bin
+output/terminal_*.bin
+output/terminal_test.mp4
 src/output/
 
