@@ -1,12 +1,22 @@
 import argparse
+import sys
 from pathlib import Path
 
 import cv2
 import numpy as np
 from ultralytics import YOLO
 
+try:
+    from config import GRID_SIZE, QUIET_WIDTH, RECTIFY_MODEL_PATH
+except ImportError:
+    try:
+        from ..config import GRID_SIZE, QUIET_WIDTH, RECTIFY_MODEL_PATH
+    except ImportError:
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        from config import GRID_SIZE, QUIET_WIDTH, RECTIFY_MODEL_PATH
 
-MODEL_PATH = "best.pt"
+
+MODEL_PATH = RECTIFY_MODEL_PATH
 
 
 def resize_for_display(image: np.ndarray, max_side: int = 1000) -> np.ndarray:
@@ -213,6 +223,21 @@ def build_dst_points(out_size: int, center_margin_ratio: float) -> np.ndarray:
     )
 
 
+def build_decoder_dst_points(out_size: int) -> np.ndarray:
+    scale = out_size / float(GRID_SIZE)
+    inset = QUIET_WIDTH * scale
+    far = (GRID_SIZE - QUIET_WIDTH) * scale
+    return np.array(
+        [
+            [inset, inset],
+            [far, inset],
+            [far, far],
+            [inset, far],
+        ],
+        dtype=np.float32,
+    )
+
+
 def rectify_image(image: np.ndarray, src_pts: np.ndarray, out_size: int, center_margin_ratio: float):
     # Map center points to an inset quad (not image corners) to keep more outer context.
     dst_pts = build_dst_points(out_size, center_margin_ratio)
@@ -229,6 +254,20 @@ def rectify_image_cropped(image: np.ndarray, src_pts: np.ndarray, out_size: int)
     )
     mat = cv2.getPerspectiveTransform(src_pts, dst_pts)
     return cv2.warpPerspective(image, mat, (out_size, out_size))
+
+
+def rectify_image_for_decoder(image: np.ndarray, src_pts: np.ndarray, out_size: int) -> np.ndarray:
+    # Map finder-role corners into the protocol's expected finder geometry.
+    dst_pts = build_decoder_dst_points(out_size)
+    mat = cv2.getPerspectiveTransform(src_pts, dst_pts)
+    return cv2.warpPerspective(
+        image,
+        mat,
+        (out_size, out_size),
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=255,
+    )
 
 
 def warp_keep_all(image: np.ndarray, homography: np.ndarray, out_size: int) -> np.ndarray:
@@ -484,23 +523,27 @@ def main():
         rectified_stage2 = warp_keep_all(rectified_stage1, stage2_h, out_size=args.size)
         pass2_refined = True
 
-    # Extra output: cropped rectification from refined corner points.
+    # Extra outputs for cropped viewing and decoder-oriented geometry.
     if pass2_corner_pts is not None:
         refined_corner_cropped = rectify_image_cropped(rectified_stage1, pass2_corner_pts, out_size=args.size)
+        decoder_rectified = rectify_image_for_decoder(rectified_stage1, pass2_corner_pts, out_size=args.size)
     else:
         refined_corner_cropped = rectify_image_cropped(image, stage1_corner_pts, out_size=args.size)
+        decoder_rectified = rectify_image_for_decoder(image, stage1_corner_pts, out_size=args.size)
 
     first_detect_path = output_dir / "01_first_detection.jpg"
     first_rectified_path = output_dir / "02_first_rectified.jpg"
     second_detect_path = output_dir / "03_second_detection.jpg"
     second_rectified_path = output_dir / "04_second_rectified.jpg"
     refined_corner_cropped_path = output_dir / "05_refined_corner_cropped.jpg"
+    decoder_rectified_path = output_dir / "06_decoder_rectified.jpg"
 
     cv2.imwrite(str(first_detect_path), debug_vis)
     cv2.imwrite(str(first_rectified_path), rectified_stage1)
     cv2.imwrite(str(second_detect_path), pass2_vis)
     cv2.imwrite(str(second_rectified_path), rectified_stage2)
     cv2.imwrite(str(refined_corner_cropped_path), refined_corner_cropped)
+    cv2.imwrite(str(decoder_rectified_path), decoder_rectified)
 
     print(f"Model: {MODEL_PATH}")
     print(f"Input: {image_path.resolve()}")
@@ -514,6 +557,7 @@ def main():
     print(f"Saved: {second_detect_path.resolve()}")
     print(f"Saved: {second_rectified_path.resolve()}")
     print(f"Saved: {refined_corner_cropped_path.resolve()}")
+    print(f"Saved: {decoder_rectified_path.resolve()}")
 
     if args.show:
         debug_show = resize_for_display(debug_vis, max_side=args.show_max_side)
@@ -521,11 +565,13 @@ def main():
         pass2_show = resize_for_display(pass2_vis, max_side=args.show_max_side)
         rectified2_show = resize_for_display(rectified_stage2, max_side=args.show_max_side)
         refined_cropped_show = resize_for_display(refined_corner_cropped, max_side=args.show_max_side)
+        decoder_show = resize_for_display(decoder_rectified, max_side=args.show_max_side)
         cv2.imshow("rectify_debug", debug_show)
         cv2.imshow("rectified_pass1", rectified1_show)
         cv2.imshow("rectified_pass2", pass2_show)
         cv2.imshow("rectified_pass2_refined", rectified2_show)
         cv2.imshow("rectified_refined_corner_cropped", refined_cropped_show)
+        cv2.imshow("rectified_decoder", decoder_show)
         cv2.waitKey(0)
         cv2.destroyAllWindows()
 
