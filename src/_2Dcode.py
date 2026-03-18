@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+
 from pathlib import Path
 
 import binascii
@@ -188,11 +189,40 @@ def _iter_data_cells():
 
 DATA_ITER = list(_iter_data_cells())
 INFO_ITER = list(_iter_cells(HEADER_BOUNDS))
-# 计算当前尺寸下能装多少 bit
-DATA_SIZE_LIMIT = len(DATA_ITER)
-print(f"[Config] 自动适配 GRID_SIZE={GRID_SIZE}, 当前单帧纯数据容量为: {DATA_SIZE_LIMIT} bits")
-if len(DATA_ITER) != DATA_SIZE_LIMIT:
-    raise ValueError(f"数据区容量 {len(DATA_ITER)} 不等于预设值 {DATA_SIZE_LIMIT}")
+
+# 计算当前尺寸下的容量
+# reedsolo.RSCodec(nsym) 使用分块编码，每块最多 (255 - nsym) bytes 数据 + nsym bytes ECC
+# 对于较大的数据，需要分成多个块，每块添加 nsym bytes ECC
+TOTAL_CAPACITY_BITS = len(DATA_ITER)
+MAX_ECC_PAYLOAD_BYTES = TOTAL_CAPACITY_BITS // 8  # 向下取整
+
+# 计算在 ECC 限制下，能存放多少数据
+# 使用二分查找找到最大数据量，使得 RS编码后不超过容量
+def calc_ecc_size(data_bytes: int, nsym: int = ECC_BYTES) -> int:
+    """计算RS编码后的总字节数（使用 reedsolo 默认参数）"""
+    nsize = 255
+    if data_bytes == 0:
+        return 0
+    num_blocks = (data_bytes + nsize - nsym - 1) // (nsize - nsym)
+    return data_bytes + num_blocks * nsym
+
+# 二分查找最大数据量
+left, right = 0, MAX_ECC_PAYLOAD_BYTES
+while left < right:
+    mid = (left + right + 1) // 2
+    if calc_ecc_size(mid) <= MAX_ECC_PAYLOAD_BYTES:
+        left = mid
+    else:
+        right = mid - 1
+
+MAX_DATA_BYTES = left
+DATA_SIZE_LIMIT = MAX_DATA_BYTES * 8  # 每帧纯数据容量（不含ECC）
+ACTUAL_ECC_BYTES = calc_ecc_size(MAX_DATA_BYTES) - MAX_DATA_BYTES
+
+print(f"[Config] 自动适配 GRID_SIZE={GRID_SIZE}")
+print(f"  - 数据区总容量: {TOTAL_CAPACITY_BITS} bits ({MAX_ECC_PAYLOAD_BYTES} bytes)")
+print(f"  - RS纠错参数: nsym={ECC_BYTES}, 实际ECC开销: {ACTUAL_ECC_BYTES} bytes")
+print(f"  - 单帧纯数据容量: {DATA_SIZE_LIMIT} bits ({MAX_DATA_BYTES} bytes)")
 
 
 def save_test_frames(grids: np.ndarray, out_dir: str = "output/test_frames") -> None:
