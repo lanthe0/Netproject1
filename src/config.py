@@ -25,4 +25,6 @@ HEADER_SIZE = 64
 DATA_BOUNDS = (2, 106, 27, 98)
 
 # 每帧增加 16 个 ECC 字节，意味著每帧可以修復 8 个错誤字节
-ECC_BYTES = 16 
+ECC_BYTES = 16
+
+RECTIFY_MODEL_PATH = "best.pt"
