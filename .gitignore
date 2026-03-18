@@ -60,6 +60,7 @@ Thumbs.db
 output/compare_test/
 output/debug/
 output/test_frames/
+output/test_encode_frames/
 output/rectified.png
 output/interface_rectified_cropped.jpg
 output/direct_*.bin
@@ -68,4 +69,11 @@ output/rawframe_*.bin
 output/terminal_*.bin
 output/terminal_test.mp4
 src/output/
+
+# Test scripts (for debugging capacity issues)
+analyze_capacity.py
+debug_capacity.py
+find_error_frame.py
+test_packbits.py
+verify_reedsolo.py
 
