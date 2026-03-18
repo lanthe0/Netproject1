@@ -404,7 +404,10 @@ def decode_image(imgs: np.ndarray, out_bin_path: str, out_vbin_path: str) -> Non
             truncated_len_frames += 1
 
         byte_len = (bit_len + 7) // 8
-        total_byte_len = byte_len + ECC_BYTES
+        # 计算实际的ECC payload长度（考虑分块编码）
+        # reedsolo 使用分块编码，需要调用实际的encode来确定长度
+        test_encode = rs.encode(b'\x00' * byte_len)
+        total_byte_len = len(test_encode)
         total_bit_len = total_byte_len * 8
         ecc_payload_bits = np.array(
             [grid[r, c] for (r, c) in DATA_ITER[:total_bit_len]], dtype=np.uint8
