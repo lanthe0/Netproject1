@@ -76,4 +76,11 @@ debug_capacity.py
 find_error_frame.py
 test_packbits.py
 verify_reedsolo.py
+analyze_qr_stats.py
+test_decode_simple.py
+test_video_system.py
+
+# Additional output files
+output/
+docs/output/
 
