@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import os
 import sys
 
@@ -16,14 +17,25 @@ except ImportError:
 
 
 def main() -> None:
-    if len(sys.argv) != 4:
-        print("Usage: python decode.py <input_video> <output_bin> <output_vbin>")
-        print("Example: python decode.py output.mp4 output/decoded.bin output/vout.bin")
-        sys.exit(1)
+    parser = argparse.ArgumentParser(description="Decode captured video back to binary data")
+    parser.add_argument("input_video", help="Input captured video path")
+    parser.add_argument("output_bin", help="Decoded output binary path")
+    parser.add_argument("output_vbin", help="Decoded validity bitmap path")
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable rectification debug output (processed frames / failed frames / yolo visualization)",
+    )
+    parser.add_argument(
+        "--debug-dir",
+        default="output/rectify_debug",
+        help="Directory used when --debug is enabled",
+    )
+    args = parser.parse_args()
 
-    input_video_path = sys.argv[1]
-    output_bin_path = sys.argv[2]
-    output_vbin_path = sys.argv[3]
+    input_video_path = args.input_video
+    output_bin_path = args.output_bin
+    output_vbin_path = args.output_vbin
 
     if not os.path.exists(input_video_path):
         print(f"Error: input file does not exist: {input_video_path}")
@@ -36,7 +48,11 @@ def main() -> None:
     print(f"output validity file: {output_vbin_path}")
 
     try:
-        prepared_frames = video_to_qr_sequence(input_video_path)
+        prepared_frames = video_to_qr_sequence(
+            input_video_path,
+            debug=args.debug,
+            debug_dir=args.debug_dir,
+        )
     except Exception as exc:
         print(f"Error: failed to preprocess video frames: {exc}")
         sys.exit(1)
