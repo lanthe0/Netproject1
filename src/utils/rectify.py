@@ -1,6 +1,7 @@
 import argparse
 import sys
 from pathlib import Path
+from itertools import combinations
 
 import cv2
 import numpy as np
@@ -17,6 +18,452 @@ except ImportError:
 
 
 MODEL_PATH = RECTIFY_MODEL_PATH
+
+
+def box_size(box_xyxy) -> tuple[float, float]:
+    """计算检测框的宽和高。
+
+    输入:
+    - box_xyxy: `(x1, y1, x2, y2)` 形式的检测框。
+
+    输出:
+    - `(width, height)` 二元组。
+
+    原理/流程:
+    - 直接用右下角减去左上角，得到轴对齐包围框尺寸。
+    """
+
+    x1, y1, x2, y2 = box_xyxy
+    return max(0.0, float(x2) - float(x1)), max(0.0, float(y2) - float(y1))
+
+
+def box_side(box_xyxy) -> float:
+    """估计检测框对应 finder 的平均边长。
+
+    输入:
+    - box_xyxy: `(x1, y1, x2, y2)` 形式的检测框。
+
+    输出:
+    - 宽高均值，作为 finder 尺寸的近似值。
+
+    原理/流程:
+    - 分别计算宽和高。
+    - 取两者平均值，减少轻微拉伸带来的波动。
+    """
+
+    width, height = box_size(box_xyxy)
+    return (width + height) * 0.5
+
+
+def center_distance(det_a, det_b) -> float:
+    """计算两个检测框中心点之间的欧氏距离。
+
+    输入:
+    - det_a: 第一个检测框字典。
+    - det_b: 第二个检测框字典。
+
+    输出:
+    - 两个中心点之间的距离。
+
+    原理/流程:
+    - 先取两个框中心点。
+    - 再计算二维平面上的欧氏距离。
+    """
+
+    return float(np.linalg.norm(center_of(det_a["xyxy"]) - center_of(det_b["xyxy"])))
+
+
+def _detection_iou(det_a, det_b) -> float:
+    """计算两个检测框的 IoU。
+
+    输入:
+    - det_a: 第一个检测框字典。
+    - det_b: 第二个检测框字典。
+
+    输出:
+    - `[0, 1]` 范围内的 IoU 数值。
+
+    原理/流程:
+    - 计算两个轴对齐矩形的交并比。
+    - 用于去重和抑制明显重复框。
+    """
+
+    ax1, ay1, ax2, ay2 = det_a["xyxy"]
+    bx1, by1, bx2, by2 = det_b["xyxy"]
+    inter_x1 = max(ax1, bx1)
+    inter_y1 = max(ay1, by1)
+    inter_x2 = min(ax2, bx2)
+    inter_y2 = min(ay2, by2)
+    inter_w = max(0.0, inter_x2 - inter_x1)
+    inter_h = max(0.0, inter_y2 - inter_y1)
+    inter = inter_w * inter_h
+    area_a = max(1e-6, det_a["area"])
+    area_b = max(1e-6, det_b["area"])
+    union = area_a + area_b - inter
+    return inter / union if union > 0 else 0.0
+
+
+def _make_virtual_detection(center: np.ndarray, side: float, score: float) -> dict[str, object]:
+    """根据预测中心构造一个虚拟小 finder 检测框。
+
+    输入:
+    - center: 预测得到的小 finder 中心点坐标。
+    - side: 估计的小 finder 边长。
+    - score: 分配给该虚拟框的置信分数。
+
+    输出:
+    - 与 YOLO 检测结果格式兼容的检测框字典。
+
+    原理/流程:
+    - 以预测中心为核心构造一个正方形框。
+    - 当真实小 finder 漏检时，用该虚拟框支撑第一阶段几何矫正。
+    """
+
+    half = max(2.0, float(side) * 0.5)
+    cx, cy = float(center[0]), float(center[1])
+    x1, y1, x2, y2 = cx - half, cy - half, cx + half, cy + half
+    return {
+        "xyxy": (x1, y1, x2, y2),
+        "score": float(score),
+        "area": float((x2 - x1) * (y2 - y1)),
+        "virtual": True,
+    }
+
+
+def prune_finder_candidates(detections, image_shape, max_candidates: int = 8):
+    """对检测框做一次几何筛选，尽量去掉明显无用框。
+
+    输入:
+    - detections: 原始检测框列表。
+    - image_shape: 图像形状，用于估计面积阈值。
+    - max_candidates: 最多保留多少个候选框。
+
+    输出:
+    - 更干净、排序后的候选检测框列表。
+
+    原理/流程:
+    - 先按长宽比、面积和贴边程度过滤明显异常框。
+    - 再融合 YOLO 分数、方形程度和面积先验做排序。
+    - 最后通过 IoU 和中心距离做轻量去重，只保留少量高质量候选。
+    """
+
+    if not detections:
+        return []
+
+    image_h, image_w = image_shape[:2]
+    image_area = float(image_h * image_w)
+    sorted_areas = sorted((float(det["area"]) for det in detections), reverse=True)
+    area_window = sorted_areas[: min(4, len(sorted_areas))]
+    reference_area = float(np.median(area_window)) if area_window else 0.0
+    min_area = max(image_area * 0.00015, reference_area * 0.12)
+    max_area = min(image_area * 0.5, max(reference_area * 6.0, image_area * 0.03))
+    pruned = []
+
+    for det in detections:
+        x1, y1, x2, y2 = det["xyxy"]
+        width, height = box_size(det["xyxy"])
+        if width <= 0 or height <= 0:
+            continue
+        if det["area"] < min_area:
+            continue
+        if det["area"] > max_area:
+            continue
+
+        aspect = width / max(height, 1e-6)
+        if not 0.55 <= aspect <= 1.45:
+            continue
+
+        edge_margin = min(x1, y1, image_w - x2, image_h - y2)
+        square_score = 1.0 - min(abs(1.0 - aspect), 1.0)
+        area_score = min(det["area"] / max(reference_area, 1e-6), 1.0)
+        edge_score = 0.35 if edge_margin < min(image_w, image_h) * 0.015 else 0.0
+        rank_score = float(det["score"]) * 2.0 + square_score + area_score - edge_score
+
+        enriched = dict(det)
+        enriched["rank_score"] = float(rank_score)
+        pruned.append(enriched)
+
+    pruned.sort(key=lambda item: (item["rank_score"], item["score"], item["area"]), reverse=True)
+
+    deduped = []
+    for det in pruned:
+        keep = True
+        for kept in deduped:
+            if _detection_iou(det, kept) > 0.35:
+                keep = False
+                break
+            limit = max(box_side(det["xyxy"]), box_side(kept["xyxy"])) * 0.35
+            if center_distance(det, kept) < limit:
+                keep = False
+                break
+        if keep:
+            deduped.append(det)
+        if len(deduped) >= max_candidates:
+            break
+
+    return deduped
+
+
+def select_roles_with_prediction(detections, min_area_ratio: float = 1.2):
+    """优先用三个大 finder 推算右下小 finder，并给出角色分配结果。
+
+    输入:
+    - detections: 已经过滤后的检测框列表。
+    - min_area_ratio: 大 finder 与小 finder 的最小面积比先验。
+
+    输出:
+    - `roles` 字典，包含 `tl/tr/br/bl` 四个角色。
+
+    原理/流程:
+    - 枚举若干组三个候选框，假设它们对应三个大 finder。
+    - 依据三角拓扑推算右下小 finder 的理论中心位置。
+    - 优先从预测点附近挑真实小框；若附近没有可靠候选，则构造虚拟小框补位。
+    """
+
+    if len(detections) < 3:
+        raise RuntimeError("Pass1 failed: less than 3 detections.")
+
+    ordered = sorted(
+        detections,
+        key=lambda item: (float(item.get("rank_score", item["score"])), item["area"]),
+        reverse=True,
+    )
+    search_pool = ordered[: min(len(ordered), 8)]
+    image_score = None
+    best_roles = None
+
+    for combo in combinations(search_pool, 3):
+        big3 = list(combo)
+        big_pts = [center_of(det["xyxy"]) for det in big3]
+        sums = [p[0] + p[1] for p in big_pts]
+        tl_idx = int(np.argmin(sums))
+        tl_det = big3[tl_idx]
+        tl_center = big_pts[tl_idx]
+
+        rem = [(big3[i], big_pts[i]) for i in range(3) if i != tl_idx]
+        if rem[0][1][0] >= rem[1][1][0]:
+            tr_det, tr_center = rem[0]
+            bl_det, bl_center = rem[1]
+        else:
+            tr_det, tr_center = rem[1]
+            bl_det, bl_center = rem[0]
+
+        vec_tr = tr_center - tl_center
+        vec_bl = bl_center - tl_center
+        len_tr = float(np.linalg.norm(vec_tr))
+        len_bl = float(np.linalg.norm(vec_bl))
+        if len_tr < 8 or len_bl < 8:
+            continue
+
+        cosine = abs(float(np.dot(vec_tr, vec_bl)) / max(len_tr * len_bl, 1e-6))
+        if cosine > 0.6:
+            continue
+
+        predicted_br = tr_center + bl_center - tl_center
+        big_areas = [float(det["area"]) for det in (tl_det, tr_det, bl_det)]
+        area_similarity = min(big_areas) / max(max(big_areas), 1e-6)
+        avg_big_side = float(np.mean([box_side(det["xyxy"]) for det in (tl_det, tr_det, bl_det)]))
+        expected_small_side = max(6.0, avg_big_side * 0.5)
+        max_search_dist = max(avg_big_side * 1.6, 24.0)
+
+        small_candidates = [det for det in search_pool if det not in big3]
+        best_small = None
+        best_small_score = -1e9
+        for small_det in small_candidates:
+            small_center = center_of(small_det["xyxy"])
+            dist = float(np.linalg.norm(small_center - predicted_br))
+            if dist > max_search_dist:
+                continue
+
+            small_area = float(small_det["area"])
+            area_ratio = min(big_areas) / max(small_area, 1e-6)
+            if area_ratio < min_area_ratio * 0.7:
+                continue
+
+            area_fit = 1.0 / (1.0 + abs(area_ratio - 2.5))
+            dist_fit = 1.0 - min(dist / max_search_dist, 1.0)
+            candidate_score = float(small_det["score"]) + area_fit + dist_fit
+            if candidate_score > best_small_score:
+                best_small_score = candidate_score
+                best_small = small_det
+
+        geometry_score = (
+            float(tl_det["score"] + tr_det["score"] + bl_det["score"])
+            + area_similarity * 2.0
+            + (1.0 - cosine) * 2.0
+        )
+
+        if best_small is None:
+            br_det = _make_virtual_detection(predicted_br, expected_small_side, score=0.01)
+            total_score = geometry_score - 0.35
+        else:
+            br_det = best_small
+            total_score = geometry_score + best_small_score
+
+        roles = {
+            "tl": tl_det,
+            "tr": tr_det,
+            "br": br_det,
+            "bl": bl_det,
+        }
+        if image_score is None or total_score > image_score:
+            image_score = total_score
+            best_roles = roles
+
+    if best_roles is None:
+        raise RuntimeError("Pass1 failed: unable to build role assignment from detections.")
+    return best_roles
+
+
+def _contour_depth(hierarchy: np.ndarray, index: int) -> int:
+    """计算某个轮廓被多少层父轮廓包围。
+
+    输入:
+    - hierarchy: OpenCV 返回的轮廓层级数组，形状为 `(n, 4)`。
+    - index: 当前要检查的轮廓下标。
+
+    输出:
+    - 轮廓嵌套深度整数值。深度越大，越像 finder 那种黑白嵌套结构。
+
+    原理/流程:
+    - 沿着当前轮廓的 parent 指针不断向上回溯。
+    - 统计一共经过了多少层父轮廓。
+    """
+
+    depth = 0
+    parent = int(hierarchy[index][3])
+    while parent >= 0:
+        depth += 1
+        parent = int(hierarchy[parent][3])
+    return depth
+
+
+def _preprocess_for_finder_detection(image: np.ndarray) -> np.ndarray:
+    """构造有利于 finder 轮廓提取的二值图。
+
+    输入:
+    - image: 手机拍摄得到的 BGR 图像。
+
+    输出:
+    - 以深色结构为前景的二值图，便于后续做轮廓搜索。
+
+    原理/流程:
+    - 先转灰度并轻度模糊，压制噪声。
+    - 再做自适应阈值，尽量保住不均匀光照下的黑白环结构。
+    - 最后做一次闭运算，把断开的方形边缘重新连起来。
+    """
+
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    blur = cv2.GaussianBlur(gray, (5, 5), 0)
+    binary = cv2.adaptiveThreshold(
+        blur,
+        255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY_INV,
+        31,
+        5,
+    )
+    kernel = np.ones((3, 3), dtype=np.uint8)
+    return cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=1)
+
+
+def detect_finders_opencv(image: np.ndarray, max_candidates: int = 20):
+    """使用传统视觉轮廓几何规则提取 finder 候选框。
+
+    输入:
+    - image: 包含投影二维码的 BGR 图像。
+    - max_candidates: 最多保留多少个候选框。
+
+    输出:
+    - 与 YOLO 路径兼容的检测结果列表，元素格式为:
+      `{"xyxy": (x1, y1, x2, y2), "score": float, "area": float}`。
+
+    原理/流程:
+    - 先构造突出黑白嵌套结构的二值图。
+    - 再基于轮廓层级、近似方形、面积和填充率筛选候选。
+    - 最后按嵌套深度和形状质量打分，并做简单去重。
+    """
+
+    binary = _preprocess_for_finder_detection(image)
+    contours, hierarchy = cv2.findContours(binary, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    if hierarchy is None or not contours:
+        return []
+
+    hierarchy = hierarchy[0]
+    image_area = float(image.shape[0] * image.shape[1])
+    candidates = []
+
+    for index, contour in enumerate(contours):
+        area = float(cv2.contourArea(contour))
+        if area < image_area * 0.0005:
+            continue
+
+        perimeter = cv2.arcLength(contour, True)
+        if perimeter <= 0:
+            continue
+
+        approx = cv2.approxPolyDP(contour, 0.08 * perimeter, True)
+        if len(approx) < 4 or len(approx) > 8:
+            continue
+
+        x, y, w, h = cv2.boundingRect(contour)
+        if w <= 0 or h <= 0:
+            continue
+
+        aspect = w / float(h)
+        if not 0.65 <= aspect <= 1.35:
+            continue
+
+        rect_area = float(w * h)
+        fill_ratio = area / max(rect_area, 1.0)
+        if not 0.25 <= fill_ratio <= 0.95:
+            continue
+
+        depth = _contour_depth(hierarchy, index)
+        child = int(hierarchy[index][2])
+        has_child = child >= 0
+        if depth < 1 and not has_child:
+            continue
+
+        score = depth * 2.0
+        score += 1.0 if has_child else 0.0
+        score += max(0.0, 1.0 - abs(1.0 - aspect))
+        score += fill_ratio
+
+        candidates.append(
+            {
+                "xyxy": (float(x), float(y), float(x + w), float(y + h)),
+                "score": float(score),
+                "area": rect_area,
+            }
+        )
+
+    candidates.sort(key=lambda item: (item["score"], item["area"]), reverse=True)
+
+    deduped = []
+    for candidate in candidates:
+        x1, y1, x2, y2 = candidate["xyxy"]
+        keep = True
+        for kept in deduped:
+            kx1, ky1, kx2, ky2 = kept["xyxy"]
+            inter_x1 = max(x1, kx1)
+            inter_y1 = max(y1, ky1)
+            inter_x2 = min(x2, kx2)
+            inter_y2 = min(y2, ky2)
+            inter_w = max(0.0, inter_x2 - inter_x1)
+            inter_h = max(0.0, inter_y2 - inter_y1)
+            inter = inter_w * inter_h
+            union = candidate["area"] + kept["area"] - inter
+            iou = inter / union if union > 0 else 0.0
+            if iou > 0.5:
+                keep = False
+                break
+        if keep:
+            deduped.append(candidate)
+        if len(deduped) >= max_candidates:
+            break
+
+    return prune_finder_candidates(deduped, image.shape, max_candidates=max_candidates)
 
 
 def resize_for_display(image: np.ndarray, max_side: int = 1000) -> np.ndarray:
@@ -54,7 +501,7 @@ def detect_finders(model: YOLO, image: np.ndarray, conf: float, iou: float, max_
                 "area": float(area),
             }
         )
-    return out
+    return prune_finder_candidates(out, image.shape, max_candidates=max_det)
 
 
 def center_of(box_xyxy):
@@ -223,10 +670,26 @@ def build_dst_points(out_size: int, center_margin_ratio: float) -> np.ndarray:
     )
 
 
-def build_decoder_dst_points(out_size: int) -> np.ndarray:
+def build_decoder_dst_points(out_size: int, expand_modules: float = 0.0) -> np.ndarray:
+    """构造解码专用透视变换的目标四角坐标。
+
+    输入:
+    - out_size: 矫正输出图像边长，通常为 `GRID_SIZE * module_pixels`。
+    - expand_modules: 在协议边界基础上，额外向外扩多少个模块宽度。
+
+    输出:
+    - `4 x 2` 的浮点坐标，表示 TL/TR/BR/BL 四个目标点。
+
+    原理/流程:
+    - 基础位置仍对齐到协议里 quiet zone 内侧边界。
+    - 可选地向外扩一小段模块宽度，用于生成多个 decoder 候选几何。
+    - 不同扩张量可以覆盖不同帧上的系统性内缩偏差。
+    """
+
     scale = out_size / float(GRID_SIZE)
-    inset = QUIET_WIDTH * scale
-    far = (GRID_SIZE - QUIET_WIDTH) * scale
+    expand = expand_modules * scale
+    inset = QUIET_WIDTH * scale - expand
+    far = (GRID_SIZE - QUIET_WIDTH) * scale + expand
     return np.array(
         [
             [inset, inset],
@@ -256,9 +719,15 @@ def rectify_image_cropped(image: np.ndarray, src_pts: np.ndarray, out_size: int)
     return cv2.warpPerspective(image, mat, (out_size, out_size))
 
 
-def rectify_image_for_decoder(image: np.ndarray, src_pts: np.ndarray, out_size: int) -> np.ndarray:
+def rectify_image_for_decoder(
+    image: np.ndarray,
+    src_pts: np.ndarray,
+    out_size: int,
+    *,
+    expand_modules: float = 0.0,
+) -> np.ndarray:
     # Map finder-role corners into the protocol's expected finder geometry.
-    dst_pts = build_decoder_dst_points(out_size)
+    dst_pts = build_decoder_dst_points(out_size, expand_modules=expand_modules)
     mat = cv2.getPerspectiveTransform(src_pts, dst_pts)
     return cv2.warpPerspective(
         image,
@@ -424,7 +893,7 @@ def main():
         default=0.18,
         help="ROI expand ratio when refining corners inside detection boxes",
     )
-    parser.add_argument("--conf", type=float, default=0.15, help="Detection confidence threshold")
+    parser.add_argument("--conf", type=float, default=0.1, help="Detection confidence threshold")
     parser.add_argument("--iou", type=float, default=0.7, help="NMS IoU threshold")
     parser.add_argument("--max-det", type=int, default=20, help="Max detections")
     parser.add_argument(
