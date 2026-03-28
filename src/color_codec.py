@@ -81,6 +81,30 @@ class ColorDecodeResult:
     payload_bits: np.ndarray
 
 
+@dataclass(frozen=True)
+class WRGBDecision:
+    """WRGB 单元判色结果。
+
+    输入：
+    - 由 `_classify_wrgb_patch_with_metrics()` 在单个 payload cell 判色结束后构造。
+
+    输出：
+    - symbol: 当前 cell 判定得到的 WRGB 类别，范围 `0..3`
+    - confidence: 综合像素投票与均值距离后得到的置信度，范围 `[0, 1]`
+    - vote_ratio: 像素投票中获胜类别所占比例
+    - mean_margin: patch 均值在第一近邻和第二近邻之间的距离裕量
+
+    原理/流程：
+    - 给低置信单元邻域修正提供结构化输入；
+    - 后处理阶段只修正低置信结果，避免把原本正确的高置信单元改坏。
+    """
+
+    symbol: int
+    confidence: float
+    vote_ratio: float
+    mean_margin: float
+
+
 PALETTE_A_RGB: dict[ColorName, tuple[int, int, int]] = {
     "black": (0, 0, 0),
     "white": (255, 255, 255),
@@ -241,6 +265,7 @@ WRGB_REFERENCE_CELLS = [
 ]
 WRGB_REFERENCE_SET = set(WRGB_REFERENCE_CELLS)
 WRGB_PAYLOAD_CELLS = [cell for cell in DATA_ITER if cell not in WRGB_REFERENCE_SET]
+WRGB_PAYLOAD_CELL_SET = set(WRGB_PAYLOAD_CELLS)
 
 _DATA_ITER_SET = set(DATA_ITER)
 for _cell in WRGB_REFERENCE_CELLS:
@@ -842,15 +867,22 @@ def decode_wrgb_bits(
     )
 
     required_symbols = (bit_length + 1) // 2
-    decoded_symbols: list[int] = []
+    decisions: list[WRGBDecision] = []
     for row, col in WRGB_PAYLOAD_CELLS[:required_symbols]:
         patch = _sample_module_patch(normalized_frame, row, col, module, sample_ratio)
-        best_symbol = _classify_wrgb_patch(
+        decision = _classify_wrgb_patch_with_metrics(
             patch,
             symbol_centers_lab,
             channel_gains,
         )
-        decoded_symbols.append(int(best_symbol))
+        decisions.append(decision)
+
+    symbol_map, confidence_map = _build_wrgb_symbol_maps(required_symbols, decisions)
+    decoded_symbols = _apply_wrgb_low_confidence_correction(
+        symbol_map,
+        confidence_map,
+        required_symbols=required_symbols,
+    )
 
     return _unpair_symbols(decoded_symbols, bit_length)
 
@@ -1424,6 +1456,35 @@ def _classify_wrgb_patch(
     - 若两者一致则直接采信；若不一致，则优先使用占比更高的投票结果。
     """
 
+    return _classify_wrgb_patch_with_metrics(
+        patch_bgr,
+        symbol_centers_lab,
+        channel_gains,
+    ).symbol
+
+
+def _classify_wrgb_patch_with_metrics(
+    patch_bgr: np.ndarray,
+    symbol_centers_lab: dict[int, np.ndarray],
+    channel_gains: np.ndarray,
+) -> WRGBDecision:
+    """联合像素投票与均值距离，对单个 WRGB patch 判色并输出置信度。
+
+    输入：
+    - patch_bgr: 某个 payload cell 的中心彩色 patch。
+    - symbol_centers_lab: 每个 WRGB symbol 的 Lab 颜色中心。
+    - channel_gains: 白色参考块估计出的通道增益。
+
+    输出：
+    - `WRGBDecision`，包含类别、投票占比和综合置信度。
+
+    原理/流程：
+    - 先对白平衡后的 patch 做逐像素 Lab 距离投票；
+    - 再对 patch 均值做一次 Lab 最近邻分类；
+    - 若两者一致，则显著提高置信度；
+    - 若两者不一致，则根据投票占比与均值裕量共同决定置信度。
+    """
+
     corrected_patch = _apply_channel_gains(patch_bgr, channel_gains).astype(np.uint8)
     pixel_lab = _bgr_to_lab(corrected_patch.reshape(-1, 3)).reshape(-1, 3)
     symbols = tuple(sorted(symbol_centers_lab))
@@ -1432,19 +1493,155 @@ def _classify_wrgb_patch(
     pixel_distances = np.linalg.norm(pixel_lab[:, None, :] - center_matrix[None, :, :], axis=2)
     pixel_labels = pixel_distances.argmin(axis=1)
     vote_counts = np.bincount(pixel_labels, minlength=len(symbols)).astype(np.float32)
-    vote_winner_index = int(vote_counts.argmax())
+    vote_order = np.argsort(vote_counts)[::-1]
+    vote_winner_index = int(vote_order[0])
+    vote_runner_index = int(vote_order[1]) if len(vote_order) > 1 else vote_winner_index
     vote_ratio = float(vote_counts[vote_winner_index] / max(1.0, float(pixel_labels.size)))
+    vote_margin = float(vote_counts[vote_winner_index] - vote_counts[vote_runner_index]) / max(
+        1.0,
+        float(pixel_labels.size),
+    )
     vote_symbol = int(symbols[vote_winner_index])
 
     mean_lab = _bgr_to_lab(corrected_patch.reshape(-1, 3).mean(axis=0)).reshape(3)
     mean_distances = np.linalg.norm(center_matrix - mean_lab[None, :], axis=1)
-    mean_symbol = int(symbols[int(mean_distances.argmin())])
+    mean_order = np.argsort(mean_distances)
+    mean_best = float(mean_distances[int(mean_order[0])])
+    mean_second = float(mean_distances[int(mean_order[1])]) if len(mean_order) > 1 else mean_best
+    mean_margin = (mean_second - mean_best) / max(1.0, mean_second)
+    mean_symbol = int(symbols[int(mean_order[0])])
 
     if vote_symbol == mean_symbol:
-        return vote_symbol
-    if vote_ratio >= 0.45:
-        return vote_symbol
-    return mean_symbol
+        symbol = vote_symbol
+        confidence = min(1.0, 0.55 * vote_ratio + 0.20 * vote_margin + 0.25 * max(0.0, mean_margin))
+    elif vote_ratio >= 0.60:
+        symbol = vote_symbol
+        confidence = min(0.85, 0.60 * vote_ratio + 0.15 * vote_margin + 0.10 * max(0.0, mean_margin))
+    else:
+        symbol = mean_symbol
+        confidence = min(0.80, 0.35 * vote_ratio + 0.10 * vote_margin + 0.35 * max(0.0, mean_margin))
+
+    return WRGBDecision(
+        symbol=int(symbol),
+        confidence=float(max(0.0, confidence)),
+        vote_ratio=float(max(0.0, min(1.0, vote_ratio))),
+        mean_margin=float(max(0.0, min(1.0, mean_margin))),
+    )
+
+
+def _build_wrgb_symbol_maps(
+    required_symbols: int,
+    decisions: list[WRGBDecision],
+) -> tuple[np.ndarray, np.ndarray]:
+    """构建 WRGB 符号图与置信度图。
+
+    输入：
+    - required_symbols: 当前帧实际需要恢复的 payload symbol 数量。
+    - decisions: 对应 payload cell 的逐单元判色结果。
+
+    输出：
+    - `symbol_map`: `GRID_SIZE x GRID_SIZE` 的整型符号图，未使用位置为 `-1`
+    - `confidence_map`: 与 `symbol_map` 对应的浮点置信度图
+
+    原理/流程：
+    - payload 区按当前判色结果填入；
+    - WRGB 顶部参考块直接写入理论类别，作为硬锚点；
+    - 参考块置信度固定为 1，后续邻域修正只会借助它们，不会改它们。
+    """
+
+    symbol_map = np.full((GRID_SIZE, GRID_SIZE), -1, dtype=np.int16)
+    confidence_map = np.zeros((GRID_SIZE, GRID_SIZE), dtype=np.float32)
+
+    for color_name in WRGB_REFERENCE_COLOR_ORDER:
+        symbol = WRGB_COLOR_TO_SYMBOL[color_name]
+        for row, col in WRGB_REFERENCE_BLOCKS[color_name]:
+            symbol_map[row, col] = symbol
+            confidence_map[row, col] = 1.0
+
+    for index, (row, col) in enumerate(WRGB_PAYLOAD_CELLS[:required_symbols]):
+        decision = decisions[index]
+        symbol_map[row, col] = int(decision.symbol)
+        confidence_map[row, col] = float(decision.confidence)
+
+    return symbol_map, confidence_map
+
+
+def _apply_wrgb_low_confidence_correction(
+    symbol_map: np.ndarray,
+    confidence_map: np.ndarray,
+    *,
+    required_symbols: int,
+    low_conf_threshold: float = 0.52,
+    high_conf_threshold: float = 0.82,
+    min_support_count: int = 3,
+) -> np.ndarray:
+    """对低置信 WRGB payload 单元做保守的邻域修正。
+
+    输入：
+    - symbol_map: 当前帧的整图符号分类结果
+    - confidence_map: 与 `symbol_map` 对应的置信度
+    - required_symbols: 当前帧真实参与解码的 payload symbol 数量
+    - low_conf_threshold: 低置信阈值，低于该值才考虑修正
+    - high_conf_threshold: 高置信阈值，邻域支持必须高于该值才可作为可信种子
+    - min_support_count: 同类高置信邻居最少数量
+
+    输出：
+    - 邻域修正后的 payload symbol 数组
+
+    原理/流程：
+    - 仅对低置信 payload 单元进行处理；
+    - 只参考 8 邻域中的高置信单元与参考块；
+    - 必须出现明显多数支持才改写，避免对随机 payload 做过强平滑。
+    """
+
+    corrected_map = symbol_map.copy()
+    payload_cells = WRGB_PAYLOAD_CELLS[:required_symbols]
+
+    for row, col in payload_cells:
+        current_symbol = int(corrected_map[row, col])
+        current_conf = float(confidence_map[row, col])
+        if current_symbol < 0 or current_conf >= low_conf_threshold:
+            continue
+
+        neighbor_support: dict[int, float] = {}
+        neighbor_counts: dict[int, int] = {}
+        for dr in (-1, 0, 1):
+            for dc in (-1, 0, 1):
+                if dr == 0 and dc == 0:
+                    continue
+                rr = row + dr
+                cc = col + dc
+                if not (0 <= rr < GRID_SIZE and 0 <= cc < GRID_SIZE):
+                    continue
+                neighbor_symbol = int(corrected_map[rr, cc])
+                neighbor_conf = float(confidence_map[rr, cc])
+                if neighbor_symbol < 0 or neighbor_conf < high_conf_threshold:
+                    continue
+                neighbor_support[neighbor_symbol] = neighbor_support.get(neighbor_symbol, 0.0) + neighbor_conf
+                neighbor_counts[neighbor_symbol] = neighbor_counts.get(neighbor_symbol, 0) + 1
+
+        if not neighbor_support:
+            continue
+
+        candidate_symbol, candidate_weight = max(
+            neighbor_support.items(),
+            key=lambda item: (item[1], neighbor_counts[item[0]], -item[0]),
+        )
+        candidate_count = neighbor_counts[candidate_symbol]
+        total_weight = float(sum(neighbor_support.values()))
+        candidate_ratio = candidate_weight / max(1e-6, total_weight)
+
+        if (
+            candidate_symbol != current_symbol
+            and candidate_count >= min_support_count
+            and candidate_ratio >= 0.72
+        ):
+            corrected_map[row, col] = int(candidate_symbol)
+
+    return np.array(
+        [int(corrected_map[row, col]) for row, col in payload_cells],
+        dtype=np.uint8,
+    )
 
 
 def _frame_to_grid_bgr(frame_bgr: np.ndarray) -> tuple[np.ndarray, int]:
