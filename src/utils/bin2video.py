@@ -60,7 +60,7 @@ def bin2video(
     - 无。成功时在 `output_path` 生成视频文件。
 
     原理/流程：
-    - 先根据帧数校验时长约束。
+    - 先根据帧数估算时长；若预计时长超过 1 秒，自动只保留前 1 秒帧。
     - 创建 `cv2.VideoWriter`。
     - 不再先构造完整 `img_group`，而是“生成一帧，立即写一帧”。
     - 这样可以减少中间图像列表的额外内存占用，也减少不必要的对象保留时间。
@@ -72,9 +72,24 @@ def bin2video(
         total_frames = len(grids)
 
     required_ms = (total_frames / fps) * 1000
-    assert required_ms <= max_length_of_video, (
-        f"当前时长限制 ({max_length_of_video}ms) 无法容纳数据，需要约 {int(required_ms)}ms"
-    )
+    one_second_ms = 1000
+    frame_cap_by_1s = max(1, int(fps * one_second_ms / 1000))
+    frame_cap_by_max = max(1, int(fps * max_length_of_video / 1000))
+    frame_cap = min(frame_cap_by_1s, frame_cap_by_max)
+    effective_frames = min(total_frames, frame_cap)
+
+    if required_ms > one_second_ms:
+        dropped = total_frames - effective_frames
+        print(
+            f"[encode] 提示: 预计时长 {required_ms/1000:.2f}s > 1.00s，"
+            f"已自动截断，仅保留前 {effective_frames} 帧（丢弃 {dropped} 帧）。"
+        )
+    elif required_ms > max_length_of_video:
+        dropped = total_frames - effective_frames
+        print(
+            f"[encode] 提示: 预计时长 {required_ms/1000:.2f}s 超过 max_length，"
+            f"已截断，仅保留前 {effective_frames} 帧（丢弃 {dropped} 帧）。"
+        )
 
     output_file = Path(output_path)
     output_file.parent.mkdir(parents=True, exist_ok=True)
@@ -86,10 +101,12 @@ def bin2video(
         raise RuntimeError(f"无法创建视频写入器: {output_file}")
 
     try:
-        for grid in grids:
+        for idx, grid in enumerate(grids):
+            if idx >= effective_frames:
+                break
             frame_bgr = _grid_to_video_frame(np.asarray(grid), upscale=upscale)
             writer.write(frame_bgr)
     finally:
         writer.release()
 
-    print(f"成功生成视频: {output_file}, 共 {total_frames} 帧")
+    print(f"成功生成视频: {output_file}, 共 {effective_frames} 帧")
