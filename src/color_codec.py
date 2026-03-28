@@ -266,6 +266,8 @@ WRGB_REFERENCE_CELLS = [
 WRGB_REFERENCE_SET = set(WRGB_REFERENCE_CELLS)
 WRGB_PAYLOAD_CELLS = [cell for cell in DATA_ITER if cell not in WRGB_REFERENCE_SET]
 WRGB_PAYLOAD_CELL_SET = set(WRGB_PAYLOAD_CELLS)
+WRGB_PAYLOAD_ROWS = np.asarray([row for row, _ in WRGB_PAYLOAD_CELLS], dtype=np.int16)
+WRGB_PAYLOAD_COLS = np.asarray([col for _, col in WRGB_PAYLOAD_CELLS], dtype=np.int16)
 
 _DATA_ITER_SET = set(DATA_ITER)
 for _cell in WRGB_REFERENCE_CELLS:
@@ -867,15 +869,17 @@ def decode_wrgb_bits(
     )
 
     required_symbols = (bit_length + 1) // 2
-    decisions: list[WRGBDecision] = []
-    for row, col in WRGB_PAYLOAD_CELLS[:required_symbols]:
-        patch = _sample_module_patch(normalized_frame, row, col, module, sample_ratio)
-        decision = _classify_wrgb_patch_with_metrics(
-            patch,
-            symbol_centers_lab,
-            channel_gains,
-        )
-        decisions.append(decision)
+    payload_patches = _sample_wrgb_payload_patches(
+        normalized_frame,
+        module,
+        sample_ratio,
+        required_symbols,
+    )
+    decisions = _classify_wrgb_patches_with_metrics(
+        payload_patches,
+        symbol_centers_lab,
+        channel_gains,
+    )
 
     symbol_map, confidence_map = _build_wrgb_symbol_maps(required_symbols, decisions)
     decoded_symbols = _apply_wrgb_low_confidence_correction(
@@ -1433,6 +1437,139 @@ def _estimate_wrgb_symbol_centers(
         for symbol, color_name in WRGB_SYMBOL_TO_COLOR.items()
     }
     return reference_centers, symbol_centers_lab, channel_gains
+
+
+def _sample_wrgb_payload_patches(
+    normalized_frame: np.ndarray,
+    module: int,
+    sample_ratio: float,
+    required_symbols: int,
+) -> np.ndarray:
+    """批量截取 WRGB payload 单元的中心彩色 patch。
+
+    输入：
+    - normalized_frame: 已对齐到协议网格的彩色图。
+    - module: 单个 cell 的像素边长。
+    - sample_ratio: 中心采样窗口比例。
+    - required_symbols: 当前帧真实需要恢复的 payload symbol 数量。
+
+    输出：
+    - 形状为 `(required_symbols, h, w, 3)` 的 patch 张量。
+
+    原理/流程：
+    - 先把整张图 reshape 成 `GRID x GRID x module x module x 3`；
+    - 再一次性裁出所有 cell 的中心窗口；
+    - 最后按 payload 坐标批量取出所需 patch，避免逐 cell Python 调用。
+    """
+
+    grid_view = normalized_frame.reshape(GRID_SIZE, module, GRID_SIZE, module, 3).transpose(0, 2, 1, 3, 4)
+    margin = int(round(module * (1.0 - sample_ratio) / 2.0))
+    if 0 <= margin * 2 < module:
+        patch_view = grid_view[:, :, margin : module - margin, margin : module - margin, :]
+        if patch_view.shape[2] == 0 or patch_view.shape[3] == 0:
+            patch_view = grid_view
+    else:
+        patch_view = grid_view
+
+    rows = WRGB_PAYLOAD_ROWS[:required_symbols]
+    cols = WRGB_PAYLOAD_COLS[:required_symbols]
+    return np.ascontiguousarray(patch_view[rows, cols])
+
+
+def _classify_wrgb_patches_with_metrics(
+    patches_bgr: np.ndarray,
+    symbol_centers_lab: dict[int, np.ndarray],
+    channel_gains: np.ndarray,
+) -> list[WRGBDecision]:
+    """批量完成 WRGB patch 判色并输出置信度。
+
+    输入：
+    - patches_bgr: 形状为 `(N, h, w, 3)` 的 payload patch 张量。
+    - symbol_centers_lab: 每个 WRGB symbol 的 Lab 颜色中心。
+    - channel_gains: 白色参考块估计出的通道增益。
+
+    输出：
+    - 与输入 patch 一一对应的 `WRGBDecision` 列表。
+
+    原理/流程：
+    - 先对全部 patch 一次性做通道增益校正；
+    - 再批量计算逐像素 Lab 距离与均值距离；
+    - 最后按旧规则生成类别、投票占比和综合置信度。
+    """
+
+    patches = np.asarray(patches_bgr, dtype=np.uint8)
+    if patches.size == 0:
+        return []
+
+    corrected = _apply_channel_gains(patches, channel_gains).astype(np.uint8)
+    sample_count = corrected.shape[0]
+    flat_pixels = corrected.reshape(sample_count, -1, 3)
+    pixel_lab = _bgr_to_lab(flat_pixels.reshape(-1, 3)).reshape(sample_count, -1, 3)
+
+    symbols = np.asarray(sorted(symbol_centers_lab), dtype=np.int16)
+    center_matrix = np.stack([symbol_centers_lab[int(symbol)] for symbol in symbols], axis=0).astype(np.float32)
+    pixel_distances = np.linalg.norm(pixel_lab[:, :, None, :] - center_matrix[None, None, :, :], axis=3)
+    pixel_labels = pixel_distances.argmin(axis=2)
+    label_ids = np.arange(len(symbols), dtype=pixel_labels.dtype)
+    vote_counts = (pixel_labels[:, :, None] == label_ids[None, None, :]).sum(axis=1).astype(np.float32)
+    vote_order = np.argsort(vote_counts, axis=1)[:, ::-1]
+    vote_winner_index = vote_order[:, 0]
+    vote_runner_index = vote_order[:, 1] if vote_order.shape[1] > 1 else vote_order[:, 0]
+    pixel_total = np.maximum(1.0, float(flat_pixels.shape[1]))
+    vote_ratio = vote_counts[np.arange(sample_count), vote_winner_index] / pixel_total
+    vote_margin = (
+        vote_counts[np.arange(sample_count), vote_winner_index]
+        - vote_counts[np.arange(sample_count), vote_runner_index]
+    ) / pixel_total
+    vote_symbol = symbols[vote_winner_index].astype(np.int16)
+
+    mean_bgr = flat_pixels.mean(axis=1)
+    mean_lab = _bgr_to_lab(mean_bgr)
+    mean_distances = np.linalg.norm(center_matrix[None, :, :] - mean_lab[:, None, :], axis=2)
+    mean_order = np.argsort(mean_distances, axis=1)
+    mean_best = mean_distances[np.arange(sample_count), mean_order[:, 0]]
+    mean_second = mean_distances[np.arange(sample_count), mean_order[:, 1]] if mean_order.shape[1] > 1 else mean_best
+    mean_margin = (mean_second - mean_best) / np.maximum(1.0, mean_second)
+    mean_symbol = symbols[mean_order[:, 0]].astype(np.int16)
+
+    agree_mask = vote_symbol == mean_symbol
+    vote_prefer_mask = (~agree_mask) & (vote_ratio >= 0.60)
+    symbol = np.where(agree_mask | vote_prefer_mask, vote_symbol, mean_symbol).astype(np.int16)
+
+    confidence = np.empty(sample_count, dtype=np.float32)
+    confidence[agree_mask] = np.minimum(
+        1.0,
+        0.55 * vote_ratio[agree_mask]
+        + 0.20 * vote_margin[agree_mask]
+        + 0.25 * np.maximum(0.0, mean_margin[agree_mask]),
+    )
+    confidence[vote_prefer_mask] = np.minimum(
+        0.85,
+        0.60 * vote_ratio[vote_prefer_mask]
+        + 0.15 * vote_margin[vote_prefer_mask]
+        + 0.10 * np.maximum(0.0, mean_margin[vote_prefer_mask]),
+    )
+    mean_prefer_mask = ~(agree_mask | vote_prefer_mask)
+    confidence[mean_prefer_mask] = np.minimum(
+        0.80,
+        0.35 * vote_ratio[mean_prefer_mask]
+        + 0.10 * vote_margin[mean_prefer_mask]
+        + 0.35 * np.maximum(0.0, mean_margin[mean_prefer_mask]),
+    )
+
+    confidence = np.clip(confidence, 0.0, 1.0)
+    vote_ratio = np.clip(vote_ratio, 0.0, 1.0)
+    mean_margin = np.clip(mean_margin, 0.0, 1.0)
+
+    return [
+        WRGBDecision(
+            symbol=int(symbol[index]),
+            confidence=float(confidence[index]),
+            vote_ratio=float(vote_ratio[index]),
+            mean_margin=float(mean_margin[index]),
+        )
+        for index in range(sample_count)
+    ]
 
 
 def _classify_wrgb_patch(
