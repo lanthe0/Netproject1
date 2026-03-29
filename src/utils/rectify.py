@@ -780,6 +780,11 @@ def detect_center_alignment_anchor(
     expected_top = CENTER_ALIGNMENT_START * module
     search_px = max(1, int(round(search_modules * module)))
     margin = max(1, int(round(module * (1.0 - sample_ratio) * 0.5)))
+    integral = np.zeros((height + 1, width + 1), dtype=np.float64)
+    integral[1:, 1:] = np.cumsum(np.cumsum(gray.astype(np.float64), axis=0), axis=1)
+    expected_gray_map = np.where(CENTER_ALIGNMENT_PATTERN > 0, 0.0, 1.0).astype(np.float64)
+    weight_map = np.ones((CENTER_ALIGNMENT_SIZE, CENTER_ALIGNMENT_SIZE), dtype=np.float64)
+    weight_map[2, 2] = 1.5
 
     best_score = -1.0
     best_offset = np.zeros(2, dtype=np.float32)
@@ -800,11 +805,16 @@ def detect_center_alignment_anchor(
                         valid = False
                         break
 
-                    patch = gray[top:bottom, left:right]
-                    norm_gray = float(patch.mean()) / 255.0
-                    expected_black = float(CENTER_ALIGNMENT_PATTERN[row, col])
-                    expected_gray = 0.0 if expected_black > 0.5 else 1.0
-                    weight = 1.5 if (row == 2 and col == 2) else 1.0
+                    patch_sum = (
+                        integral[bottom, right]
+                        - integral[top, right]
+                        - integral[bottom, left]
+                        + integral[top, left]
+                    )
+                    patch_area = float((bottom - top) * (right - left))
+                    norm_gray = (patch_sum / patch_area) / 255.0
+                    expected_gray = float(expected_gray_map[row, col])
+                    weight = float(weight_map[row, col])
                     mismatch += abs(norm_gray - expected_gray) * weight
                     weight_sum += weight
                 if not valid:
