@@ -7,13 +7,13 @@ import os
 import sys
 
 try:
-    from _2Dcode import decode_image
+    from _color2Dcode import decode_image
     from config import RECTIFY_MODEL_PATH
-    from utils.video_decode import video_to_qr_sequence
+    from utils.video_decode import video_to_color_sequence
 except ImportError:
-    from ._2Dcode import decode_image
+    from ._color2Dcode import decode_image
     from .config import RECTIFY_MODEL_PATH
-    from .utils.video_decode import video_to_qr_sequence
+    from .utils.video_decode import video_to_color_sequence
 
 
 def main() -> None:
@@ -48,7 +48,7 @@ def main() -> None:
     print(f"output validity file: {output_vbin_path}")
 
     try:
-        prepared_frames = video_to_qr_sequence(
+        prepared_frames = video_to_color_sequence(
             input_video_path,
             debug=args.debug,
             debug_dir=args.debug_dir,

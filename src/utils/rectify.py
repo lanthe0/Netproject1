@@ -701,6 +701,196 @@ def build_decoder_dst_points(out_size: int, expand_modules: float = 0.0) -> np.n
     )
 
 
+def _build_center_alignment_pattern() -> np.ndarray:
+    """构造协议中心小定位格的 5x5 二值模板。
+
+    输入:
+    - 无，模板由协议固定定义。
+
+    输出:
+    - `5x5` 的 `uint8` 二值模板，`1` 表示黑色模块。
+
+    原理/流程:
+    - 外边框为黑色；
+    - 内层保留白色；
+    - 中心单点为黑色；
+    - 与 `_2Dcode.make_base_grid()` 中的中心小定位格保持一致。
+    """
+
+    pattern = np.zeros((5, 5), dtype=np.uint8)
+    pattern[0, :] = 1
+    pattern[-1, :] = 1
+    pattern[:, 0] = 1
+    pattern[:, -1] = 1
+    pattern[2, 2] = 1
+    return pattern
+
+
+CENTER_ALIGNMENT_PATTERN = _build_center_alignment_pattern()
+CENTER_ALIGNMENT_SIZE = int(CENTER_ALIGNMENT_PATTERN.shape[0])
+CENTER_ALIGNMENT_START = (GRID_SIZE - CENTER_ALIGNMENT_SIZE) // 2
+CENTER_ALIGNMENT_CENTER = CENTER_ALIGNMENT_START + CENTER_ALIGNMENT_SIZE * 0.5
+
+
+def detect_center_alignment_anchor(
+    rectified: np.ndarray,
+    *,
+    search_modules: float = 2.0,
+    sample_ratio: float = 0.55,
+) -> dict[str, object]:
+    """在 decoder 矫正图中检测中心小定位格，并估计其偏移量。
+
+    输入:
+    - rectified: 已映射到 decoder 协议坐标的矫正图。
+    - search_modules: 在理论中心附近，最多搜索多少个模块宽度。
+    - sample_ratio: 每个模块内部用于判断黑白的中心采样比例。
+
+    输出:
+    - 字典，包含：
+      - `found`: 是否找到可靠的小定位格
+      - `score`: 最优模板匹配分数，范围约为 `[0, 1]`
+      - `offset_px`: 估计出的 `(dx, dy)` 像素偏移
+      - `center_px`: 估计出的中心点像素坐标
+      - `module`: 当前图像推断出的模块像素边长
+
+    原理/流程:
+    - 协议中间存在固定的 `5x5` 小定位格，可作为内部锚点；
+    - 在理论中心附近做小范围平移搜索；
+    - 对每个候选位置按模块采样，和固定模板比较黑白误差；
+    - 选出误差最小的位置，并输出相对理论中心的偏移。
+    """
+
+    if rectified is None or rectified.size == 0:
+        return {
+            "found": False,
+            "score": 0.0,
+            "offset_px": np.zeros(2, dtype=np.float32),
+            "center_px": np.zeros(2, dtype=np.float32),
+            "module": 0,
+        }
+
+    if rectified.ndim == 2:
+        gray = rectified
+    else:
+        gray = cv2.cvtColor(rectified, cv2.COLOR_BGR2GRAY)
+
+    height, width = gray.shape[:2]
+    module = max(1, min(height, width) // GRID_SIZE)
+    expected_left = CENTER_ALIGNMENT_START * module
+    expected_top = CENTER_ALIGNMENT_START * module
+    search_px = max(1, int(round(search_modules * module)))
+    margin = max(1, int(round(module * (1.0 - sample_ratio) * 0.5)))
+    integral = np.zeros((height + 1, width + 1), dtype=np.float64)
+    integral[1:, 1:] = np.cumsum(np.cumsum(gray.astype(np.float64), axis=0), axis=1)
+    expected_gray_map = np.where(CENTER_ALIGNMENT_PATTERN > 0, 0.0, 1.0).astype(np.float64)
+    weight_map = np.ones((CENTER_ALIGNMENT_SIZE, CENTER_ALIGNMENT_SIZE), dtype=np.float64)
+    weight_map[2, 2] = 1.5
+
+    best_score = -1.0
+    best_offset = np.zeros(2, dtype=np.float32)
+
+    for dy in range(-search_px, search_px + 1):
+        for dx in range(-search_px, search_px + 1):
+            mismatch = 0.0
+            weight_sum = 0.0
+            valid = True
+            for row in range(CENTER_ALIGNMENT_SIZE):
+                for col in range(CENTER_ALIGNMENT_SIZE):
+                    top = expected_top + dy + row * module + margin
+                    left = expected_left + dx + col * module + margin
+                    bottom = expected_top + dy + (row + 1) * module - margin
+                    right = expected_left + dx + (col + 1) * module - margin
+
+                    if top < 0 or left < 0 or bottom > height or right > width or top >= bottom or left >= right:
+                        valid = False
+                        break
+
+                    patch_sum = (
+                        integral[bottom, right]
+                        - integral[top, right]
+                        - integral[bottom, left]
+                        + integral[top, left]
+                    )
+                    patch_area = float((bottom - top) * (right - left))
+                    norm_gray = (patch_sum / patch_area) / 255.0
+                    expected_gray = float(expected_gray_map[row, col])
+                    weight = float(weight_map[row, col])
+                    mismatch += abs(norm_gray - expected_gray) * weight
+                    weight_sum += weight
+                if not valid:
+                    break
+
+            if not valid or weight_sum <= 0.0:
+                continue
+
+            score = 1.0 - mismatch / weight_sum
+            if score > best_score:
+                best_score = score
+                best_offset = np.array([dx, dy], dtype=np.float32)
+
+    expected_center = np.array(
+        [CENTER_ALIGNMENT_CENTER * module, CENTER_ALIGNMENT_CENTER * module],
+        dtype=np.float32,
+    )
+    center_px = expected_center + best_offset
+    return {
+        "found": bool(best_score >= 0.72),
+        "score": float(max(best_score, 0.0)),
+        "offset_px": best_offset,
+        "center_px": center_px,
+        "module": int(module),
+    }
+
+
+def refine_decoder_with_center_anchor(
+    rectified: np.ndarray,
+    *,
+    score_threshold: float = 0.78,
+    max_shift_modules: float = 1.6,
+) -> np.ndarray:
+    """利用中心小定位格对 decoder 矫正图做一次轻量平移微调。
+
+    输入:
+    - rectified: 初步完成 decoder 映射的矫正图。
+    - score_threshold: 只有中心锚点检测分数达到该阈值时才执行微调。
+    - max_shift_modules: 允许的最大平移量，单位为模块宽度。
+
+    输出:
+    - 若检测稳定，则返回平移微调后的图像；否则原样返回。
+
+    原理/流程:
+    - 中间小定位格能反映内部网格是否与 payload 中心区域对齐；
+    - 先估计锚点相对理论中心的偏移；
+    - 若偏移量不大且检测分数足够高，则只做一次整图平移修正；
+    - 先用这种低风险方式接入内部锚点，避免直接改动主几何模型。
+    """
+
+    anchor = detect_center_alignment_anchor(rectified)
+    if not anchor["found"] or float(anchor["score"]) < score_threshold:
+        return rectified
+
+    offset = np.asarray(anchor["offset_px"], dtype=np.float32)
+    module = max(1.0, float(anchor["module"]))
+    if float(np.linalg.norm(offset)) > max_shift_modules * module:
+        return rectified
+
+    translate = np.array(
+        [
+            [1.0, 0.0, -float(offset[0])],
+            [0.0, 1.0, -float(offset[1])],
+        ],
+        dtype=np.float32,
+    )
+    return cv2.warpAffine(
+        rectified,
+        translate,
+        (rectified.shape[1], rectified.shape[0]),
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=255,
+    )
+
+
 def rectify_image(image: np.ndarray, src_pts: np.ndarray, out_size: int, center_margin_ratio: float):
     # Map center points to an inset quad (not image corners) to keep more outer context.
     dst_pts = build_dst_points(out_size, center_margin_ratio)
@@ -725,15 +915,33 @@ def rectify_image_for_decoder(
     out_size: int,
     *,
     expand_modules: float = 0.0,
+    interpolation: int = cv2.INTER_LINEAR,
 ) -> np.ndarray:
-    # Map finder-role corners into the protocol's expected finder geometry.
+    """按协议几何将四角映射到 decoder 采样坐标。
+
+    输入:
+    - image: 原始或阶段一矫正后的 BGR 图像。
+    - src_pts: TL/TR/BR/BL 顺序的四个源角点。
+    - out_size: 输出正方形图像边长。
+    - expand_modules: 目标协议边界向外扩多少个模块，用于生成几何候选。
+    - interpolation: 透视变换插值方式。黑白链路更能容忍线性插值，彩色链路更适合最近邻。
+
+    输出:
+    - 已映射到协议 quiet zone 几何上的 decoder 图像。
+
+    原理/流程:
+    - 先根据协议 quiet zone 计算目标四角位置；
+    - 再用透视变换把 finder 角点映射到这些目标点；
+    - 插值方式可配置，便于在黑白与彩色协议之间做不同优化。
+    """
+
     dst_pts = build_decoder_dst_points(out_size, expand_modules=expand_modules)
     mat = cv2.getPerspectiveTransform(src_pts, dst_pts)
     return cv2.warpPerspective(
         image,
         mat,
         (out_size, out_size),
-        flags=cv2.INTER_LINEAR,
+        flags=interpolation,
         borderMode=cv2.BORDER_CONSTANT,
         borderValue=255,
     )

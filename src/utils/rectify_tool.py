@@ -32,6 +32,7 @@ try:
         select_roles_with_prediction,
         rectify_image,
         rectify_image_cropped,
+        refine_decoder_with_center_anchor,
         rectify_image_for_decoder,
     )
 except ImportError:
@@ -45,6 +46,7 @@ except ImportError:
         select_roles_with_prediction,
         rectify_image,
         rectify_image_cropped,
+        refine_decoder_with_center_anchor,
         rectify_image_for_decoder,
     )
 
@@ -52,7 +54,7 @@ except ImportError:
 RectifyMode = Literal["cropped", "decoder"]
 IMAGE_SIZE = GRID_SIZE * 10
 DEFAULT_DECODER_EXPAND_CANDIDATES = (0.0,)
-COMPLEX_DECODER_EXPAND_CANDIDATES = (0.0, 0.1, 0.2)
+COMPLEX_DECODER_EXPAND_CANDIDATES = (0.0,)
 DEFAULT_YOLO_CONF = 0.03
 DEFAULT_YOLO_IOU = 0.5
 DEFAULT_YOLO_MAX_DET = 10
@@ -197,10 +199,21 @@ def _rectify_from_stage(
     size: int,
     mode: RectifyMode,
     expand_modules: float = 0.0,
+    decoder_interpolation: int = cv2.INTER_LINEAR,
+    enable_center_anchor_refine: bool = True,
 ) -> np.ndarray:
     if mode == "cropped":
         return rectify_image_cropped(image, src_pts, out_size=size)
-    return rectify_image_for_decoder(image, src_pts, out_size=size, expand_modules=expand_modules)
+    rectified = rectify_image_for_decoder(
+        image,
+        src_pts,
+        out_size=size,
+        expand_modules=expand_modules,
+        interpolation=decoder_interpolation,
+    )
+    if enable_center_anchor_refine:
+        return refine_decoder_with_center_anchor(rectified)
+    return rectified
 
 
 def _rectify_with_model(
@@ -217,6 +230,8 @@ def _rectify_with_model(
     corner_expand_ratio: float,
     mode: RectifyMode,
     use_second_stage_refine: bool,
+    decoder_interpolation: int,
+    enable_center_anchor_refine: bool,
 ) -> np.ndarray:
     detections = detect_finders(model, image, conf=conf, iou=iou, max_det=max_det)
     roles = _detect_roles(detections, min_area_ratio=min_area_ratio)
@@ -233,6 +248,8 @@ def _rectify_with_model(
             stage1_corner_pts,
             size=size,
             mode=mode,
+            decoder_interpolation=decoder_interpolation,
+            enable_center_anchor_refine=enable_center_anchor_refine,
         )
 
     rectified_stage1, _ = rectify_image(
@@ -266,6 +283,8 @@ def _rectify_with_model(
             pass2_corner_pts,
             size=size,
             mode=mode,
+            decoder_interpolation=decoder_interpolation,
+            enable_center_anchor_refine=enable_center_anchor_refine,
         )
 
     return _rectify_from_stage(
@@ -273,6 +292,8 @@ def _rectify_with_model(
         stage1_corner_pts,
         size=size,
         mode=mode,
+        decoder_interpolation=decoder_interpolation,
+        enable_center_anchor_refine=enable_center_anchor_refine,
     )
 
 
@@ -286,6 +307,8 @@ def _rectify_with_opencv(
     corner_expand_ratio: float,
     mode: RectifyMode,
     use_second_stage_refine: bool,
+    decoder_interpolation: int,
+    enable_center_anchor_refine: bool,
 ) -> np.ndarray:
     """使用传统视觉轮廓检测执行兜底矫正。
 
@@ -323,6 +346,8 @@ def _rectify_with_opencv(
             size=size,
             mode=mode,
             expand_modules=0.0,
+            decoder_interpolation=decoder_interpolation,
+            enable_center_anchor_refine=enable_center_anchor_refine,
         )
 
     rectified_stage1, _ = rectify_image(
@@ -351,6 +376,8 @@ def _rectify_with_opencv(
             size=size,
             mode=mode,
             expand_modules=0.0,
+            decoder_interpolation=decoder_interpolation,
+            enable_center_anchor_refine=enable_center_anchor_refine,
         )
 
     return _rectify_from_stage(
@@ -359,6 +386,8 @@ def _rectify_with_opencv(
         size=size,
         mode=mode,
         expand_modules=0.0,
+        decoder_interpolation=decoder_interpolation,
+        enable_center_anchor_refine=enable_center_anchor_refine,
     )
 
 
@@ -376,6 +405,8 @@ def _rectify_with_model_candidates(
     corner_expand_ratio: float,
     use_second_stage_refine: bool,
     expand_candidates: tuple[float, ...],
+    decoder_interpolation: int,
+    enable_center_anchor_refine: bool,
 ) -> list[np.ndarray]:
     """为单帧生成多个 decoder 几何候选，供后续按 CRC 选优。
 
@@ -446,6 +477,8 @@ def _rectify_with_model_candidates(
             size=size,
             mode="decoder",
             expand_modules=expand_modules,
+            decoder_interpolation=decoder_interpolation,
+            enable_center_anchor_refine=enable_center_anchor_refine,
         )
         for expand_modules in expand_candidates
     ]
@@ -467,6 +500,8 @@ class Rectifier:
         enable_opencv_fallback: bool = False,
         use_second_stage_refine: bool = False,
         decoder_expand_candidates: tuple[float, ...] | list[float] | None = None,
+        decoder_interpolation: int = cv2.INTER_LINEAR,
+        enable_center_anchor_refine: bool = True,
     ) -> None:
         self.model_path = model_path
         self.size = size
@@ -480,6 +515,8 @@ class Rectifier:
         self.enable_opencv_fallback = enable_opencv_fallback
         self.use_second_stage_refine = use_second_stage_refine
         self.decoder_expand_candidates = _normalize_expand_candidates(decoder_expand_candidates)
+        self.decoder_interpolation = decoder_interpolation
+        self.enable_center_anchor_refine = enable_center_anchor_refine
         self._model: YOLO | None = None
         self._model_file: Path | None = None
         self.last_error: Exception | None = None
@@ -534,6 +571,8 @@ class Rectifier:
                 corner_expand_ratio=self.corner_expand_ratio,
                 mode=mode,
                 use_second_stage_refine=self.use_second_stage_refine,
+                decoder_interpolation=self.decoder_interpolation,
+                enable_center_anchor_refine=self.enable_center_anchor_refine,
             )
             self.last_error = None
             self.last_method = "yolo"
@@ -558,6 +597,8 @@ class Rectifier:
                 corner_expand_ratio=self.corner_expand_ratio,
                 mode=mode,
                 use_second_stage_refine=self.use_second_stage_refine,
+                decoder_interpolation=self.decoder_interpolation,
+                enable_center_anchor_refine=self.enable_center_anchor_refine,
             )
             self.last_error = yolo_error
             self.last_method = "opencv"
@@ -603,6 +644,8 @@ class Rectifier:
                 corner_expand_ratio=self.corner_expand_ratio,
                 use_second_stage_refine=self.use_second_stage_refine,
                 expand_candidates=self.decoder_expand_candidates,
+                decoder_interpolation=self.decoder_interpolation,
+                enable_center_anchor_refine=self.enable_center_anchor_refine,
             )
         except Exception as exc:
             self.last_error = exc
@@ -635,6 +678,7 @@ def _get_rectified(
     save_path: Optional[str],
     mode: RectifyMode,
     use_second_stage_refine: bool,
+    enable_center_anchor_refine: bool = True,
 ) -> np.ndarray:
     normalized = _normalize_image(image)
     model_file = _resolve_model_path(model_path)
@@ -655,6 +699,8 @@ def _get_rectified(
         corner_expand_ratio=corner_expand_ratio,
         mode=mode,
         use_second_stage_refine=use_second_stage_refine,
+        decoder_interpolation=cv2.INTER_LINEAR,
+        enable_center_anchor_refine=enable_center_anchor_refine,
     )
     _save_image(rectified, save_path)
     return rectified

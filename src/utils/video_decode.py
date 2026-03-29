@@ -20,14 +20,14 @@ try:
     from config import RECTIFY_MODEL_PATH
     from _2Dcode import BASE_GRID, DATA_ITER, INFO_ITER, bytes_to_bits
     from config import BIG_FINDER_SIZE, GRID_SIZE, QUIET_WIDTH, SMALL_FINDER_SIZE
-    from utils.rectify_tool import Rectifier
+    from utils.rectify_tool import COMPLEX_DECODER_EXPAND_CANDIDATES, Rectifier
     from utils.rectify import draw_detection_only, detect_finders
     from config import ECC_BYTES
 except ImportError:
     from ..config import RECTIFY_MODEL_PATH
     from .._2Dcode import BASE_GRID, DATA_ITER, INFO_ITER, bytes_to_bits
     from ..config import BIG_FINDER_SIZE, GRID_SIZE, QUIET_WIDTH, SMALL_FINDER_SIZE
-    from .rectify_tool import Rectifier
+    from .rectify_tool import COMPLEX_DECODER_EXPAND_CANDIDATES, Rectifier
     from .rectify import draw_detection_only, detect_finders
     from ..config import ECC_BYTES
 
@@ -482,3 +482,137 @@ def video_to_qr_sequence(path: str, *, debug: bool = False, debug_dir: str = "ou
 
     frames = iter_video_frames(path)
     return preprocess_frames_for_decoder(frames, debug=debug, debug_dir=debug_dir)
+
+
+def preprocess_frames_for_color_decoder(
+    frames: list[np.ndarray] | Iterator[np.ndarray],
+    *,
+    rectifier: Rectifier | None = None,
+    debug: bool = False,
+    debug_dir: str = "output/rectify_debug_color",
+) -> list[np.ndarray]:
+    """对视频帧做 WRGB 主链路所需的彩色矫正预处理。
+
+    输入：
+    - frames: 原始视频帧列表或逐帧迭代器。
+    - rectifier: 可选的共享矫正器；为空时默认启用复杂矫正。
+    - debug: 是否保存调试图像。
+    - debug_dir: 调试图像输出目录。
+
+    输出：
+    - 彩色 rectified 帧列表；后续直接交给 `_color2Dcode.decode_image()`。
+
+    原理/流程：
+    - 与黑白主链路不同，这里不再把图像压成二值 grid；
+    - 逐帧调用复杂矫正，保留彩色 decoder 图；
+    - 每个 raw frame 只保留一个候选，避免继续堆三候选拖慢主链路；
+    - 调试时同步保存 raw / yolo / rectified 图，便于后续定位 WRGB 问题。
+    """
+
+    worker = rectifier or Rectifier(
+        model_path=RECTIFY_MODEL_PATH,
+        enable_opencv_fallback=True,
+        use_second_stage_refine=True,
+        decoder_expand_candidates=COMPLEX_DECODER_EXPAND_CANDIDATES,
+        enable_center_anchor_refine=True,
+        decoder_interpolation=cv2.INTER_LINEAR,
+    )
+    processed_frames: list[np.ndarray] = []
+    rectify_failures = 0
+    method_counter: dict[str, int] = {"yolo": 0, "opencv": 0}
+    first_failure_reason: str | None = None
+
+    dirs = _prepare_debug_dirs(debug, debug_dir)
+    model = None
+    if debug:
+        try:
+            model = worker._get_model()
+        except Exception:
+            model = None
+
+    seen_frames = 0
+    for idx, frame in enumerate(frames):
+        seen_frames += 1
+        rectified_candidates = worker.rectify_for_decoder_candidates(frame)
+
+        if not rectified_candidates:
+            rectify_failures += 1
+            _save_debug_images(
+                index=idx,
+                raw_frame=frame,
+                chosen_frame=None,
+                failed=True,
+                debug=debug,
+                dirs=dirs,
+                worker=worker,
+                model=model,
+            )
+            if first_failure_reason is None:
+                first_failure_reason = str(worker.last_error) if worker.last_error is not None else "unknown rectify failure"
+            continue
+
+        chosen_frame = rectified_candidates[0]
+        processed_frames.append(chosen_frame)
+        if worker.last_method in method_counter:
+            method_counter[worker.last_method] += 1
+        _save_debug_images(
+            index=idx,
+            raw_frame=frame,
+            chosen_frame=chosen_frame,
+            failed=False,
+            debug=debug,
+            dirs=dirs,
+            worker=worker,
+            model=model,
+        )
+
+        if (idx + 1) % 100 == 0:
+            print(
+                "wrgb rectify progress: "
+                f"{idx + 1} frames, "
+                f"kept={len(processed_frames)}, "
+                f"failures={rectify_failures}, "
+                f"yolo={method_counter['yolo']}, "
+                f"opencv={method_counter['opencv']}"
+            )
+
+    print(f"rectify model: {worker.model_file}")
+    print(
+        "wrgb rectify summary: "
+        f"seen={seen_frames}, "
+        f"kept={len(processed_frames)}, "
+        f"failures={rectify_failures}, "
+        f"yolo={method_counter['yolo']}, "
+        f"opencv={method_counter['opencv']}"
+    )
+    if first_failure_reason is not None:
+        print(f"first wrgb rectify failure: {first_failure_reason}")
+    if debug:
+        print(f"wrgb rectify debug saved: {dirs['root'].resolve()}")
+    return processed_frames
+
+
+def video_to_color_sequence(
+    path: str,
+    *,
+    debug: bool = False,
+    debug_dir: str = "output/rectify_debug_color",
+) -> list[np.ndarray]:
+    """将实拍视频转换成 WRGB 主协议可直接解码的彩色序列。
+
+    输入：
+    - path: 实拍视频路径。
+    - debug: 是否保存调试图像。
+    - debug_dir: 调试图像输出目录。
+
+    输出：
+    - 彩色 rectified 帧列表。
+
+    原理/流程：
+    - 流式读取视频；
+    - 逐帧做复杂矫正与中心锚点微调；
+    - 保留彩色 rectified 图，供 WRGB 协议主解码使用。
+    """
+
+    frames = iter_video_frames(path)
+    return preprocess_frames_for_color_decoder(frames, debug=debug, debug_dir=debug_dir)
