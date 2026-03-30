@@ -220,9 +220,9 @@ DATA_SIZE_LIMIT = MAX_DATA_BYTES * 8  # 每帧纯数据容量（不含ECC）
 ACTUAL_ECC_BYTES = calc_ecc_size(MAX_DATA_BYTES) - MAX_DATA_BYTES
 
 print(f"[Config] 自动适配 GRID_SIZE={GRID_SIZE}")
-print(f"  - 数据区总容量: {TOTAL_CAPACITY_BITS} bits ({MAX_ECC_PAYLOAD_BYTES} bytes)")
+print(f"  - 数据区总容量: {TOTAL_CAPACITY_BITS*2} bits ({MAX_ECC_PAYLOAD_BYTES*2} bytes)")
 print(f"  - RS纠错参数: nsym={ECC_BYTES}, 实际ECC开销: {ACTUAL_ECC_BYTES} bytes")
-print(f"  - 单帧纯数据容量: {DATA_SIZE_LIMIT} bits ({MAX_DATA_BYTES} bytes)")
+print(f"  - 单帧纯数据容量: {DATA_SIZE_LIMIT*2} bits ({MAX_DATA_BYTES*2} bytes)")
 
 
 def save_test_frames(grids: np.ndarray, out_dir: str = "output/test_frames") -> None:
